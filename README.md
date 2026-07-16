@@ -16,14 +16,14 @@ Accuracy tuning: [plans/accuracy-improvements.md](plans/accuracy-improvements.md
 
 ## Layout
 
-| Path | Purpose |
-| --- | --- |
-| `server/lipsync/` | The lipsync package: types, vendored DSP (LPC/Levinson, formants, pitch, P² quantiles), formant (Tier 0) analyzer, `LipsyncProcessor`, app-local frames, RTVI server-message relay |
-| `server/bot.py` | Official `pipecat init quickstart` starter bot with the lipsync processor + relay wired in |
-| `server/tests/` | Unit tests (DSP, analyzer, processor, relay) |
-| `server/benchmarks/` | Accuracy harness (Praat reference + designed corpus) |
-| `client/` | Vite + React web client: connects over SmallWebRTC, parses lipsync server-messages, renders an animated mouth with timing/event inspectors |
-| `plans/` | Technical specification and implementation/tuning docs |
+| Path                 | Purpose                                                                                                                                                                            |
+| -------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `server/lipsync/`    | The lipsync package: types, vendored DSP (LPC/Levinson, formants, pitch, P² quantiles), formant (Tier 0) analyzer, `LipsyncProcessor`, app-local frames, RTVI server-message relay |
+| `server/bot.py`      | Official `pipecat init quickstart` starter bot with the lipsync processor + relay wired in                                                                                         |
+| `server/tests/`      | Unit tests (DSP, analyzer, processor, relay)                                                                                                                                       |
+| `server/benchmarks/` | Accuracy harness (Praat reference + designed corpus)                                                                                                                               |
+| `client/`            | Vite + React web client: connects over SmallWebRTC, parses lipsync server-messages, renders an animated mouth with timing/event inspectors                                         |
+| `plans/`             | Technical specification and implementation/tuning docs                                                                                                                             |
 
 ## How delivery works
 
@@ -65,13 +65,3 @@ uv run python -m benchmarks.accuracy --offline --compare  # free re-score vs bas
 Scores the analyzer against Praat reference tracks (L1 formant Hz, L2 trajectory shape)
 and corpus expectations (L3 events) — see [plans/benchmark-harness-accuracy.md](plans/benchmark-harness-accuracy.md).
 Baseline: `server/benchmarks/results/baseline.json` (composite 70.9).
-
-## History
-
-This started as a pipecat fork (branch `feat/lipsync-processor`) targeting an
-upstream PR, then was extracted into this standalone app. The only fork-coupled
-pieces — the two frame classes and the RTVI observer dispatch — were
-re-expressed as `lipsync/frames.py` and `lipsync/rtvi.py` on public pipecat
-API; the analyzer/DSP/processor modules moved verbatim. The fork snapshot is
-preserved in `~/Sites/pipecat-lipsync-fork.bundle`. A future upstream
-contribution is a mechanical copy-back (module filenames were kept identical).
