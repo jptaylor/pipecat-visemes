@@ -1,0 +1,60 @@
+# Accuracy benchmark corpus: sentences with known articulation expectations.
+# See plans/benchmark-harness-accuracy.md §5. Event expectations are loose
+# ranges by design: the energy-dip closure detector fires on all stops, and
+# TTS coarticulation merges some closures.
+
+voices:
+  cartesia:
+    - id: "71a7ad14-091c-4e8e-a314-022ece01c121" # quickstart default voice
+      formant_ceiling: 5000 # Praat ceiling: 5500 female / 5000 male; this voice ~178 Hz median
+  deepgram:
+    - id: "aura-2-helena-en" # DeepgramTTSService default voice
+      formant_ceiling: 5500
+
+sentences:
+  # Vowel-probe bars are peak-reaching (p90 over voiced hops in the
+  # post-convergence window, t >= 1.5 s — matching the oracle's steady-state
+  # framing; cold-start cost is measured by convergence_s and gated
+  # client-side by confidence). Calibrated 2026-07-14 via
+  # `--calibrate-expectations`: bar = 0.8 x min(Praat oracle over takes).
+  # A `width_p90_max` bound was considered for vowel-oo and dropped: per-clip
+  # normalization makes that oracle ~0.9 for every clip.
+  - id: vowel-aa
+    text: "Father was calm as he walked past the palm trees."
+    tags: [vowel-probe]
+    expect: { openness_p90_min: 0.72 } # oracle 0.899 / 0.900
+  - id: vowel-ee
+    text: "See the green trees? Please believe me, these seeds are free."
+    tags: [vowel-probe]
+    expect: { width_p90_min: 0.77 } # oracle 0.961 / 0.989
+  - id: vowel-oo
+    text: "Soon the new moon grew blue, and the room felt cool."
+    tags: [vowel-probe]
+    expect: { rounding_p90_min: 0.37 } # oracle 0.593 / 0.467
+  - id: bilabial-mama
+    text: "Mama made more mashed potatoes for my mother."
+    tags: [events]
+    expect: { closures_min: 4, closures_max: 14 }
+  - id: bilabial-bob
+    text: "Bob put a big pepper in the paper bag."
+    tags: [events]
+    expect: { closures_min: 5, closures_max: 14 }
+  - id: nasal-hum
+    text: "Hmm. Hmm, hmm."
+    tags: [events, nasal-guard]
+    expect: { nasals_min: 2, openness_p90_max: 0.30 }
+  - id: pause-probe
+    text: "Wait for it. Now continue talking normally."
+    tags: [events]
+    expect: { silences_min: 1 }
+  # Phonetically balanced sentences (Harvard set 1) — L1/L2 scoring only.
+  - id: harvard-01
+    text: "The birch canoe slid on the smooth planks."
+  - id: harvard-02
+    text: "Glue the sheet to the dark blue background."
+  - id: harvard-03
+    text: "It's easy to tell the depth of a well."
+  - id: harvard-04
+    text: "These days a chicken leg is a rare dish."
+  - id: harvard-05
+    text: "Rice is often served in round bowls."

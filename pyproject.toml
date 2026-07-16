@@ -1,0 +1,26 @@
+[project]
+name = "pipecat-visemes"
+version = "0.1.0"
+description = "Test harness for the Pipecat lipsync (viseme) processor — pipecat-ai is installed editable from ./src"
+requires-python = ">=3.11"
+dependencies = [
+    # Extras match the official `pipecat init quickstart` scaffold (SmallWebRTC/Daily
+    # transports, Deepgram STT, OpenAI LLM, Cartesia TTS), plus `cli` for the
+    # `pipecat` command. The lipsync processor (Tier 0) needs no extra: its only
+    # requirements, numpy and soxr, are pipecat core dependencies.
+    "pipecat-ai[cartesia,cli,daily,deepgram,openai,runner,silero,webrtc]",
+]
+
+[dependency-groups]
+dev = [
+    "pytest>=8",
+    # Accuracy benchmark harness (benchmarks/accuracy.py): Praat reference
+    # tracks and the corpus file. Harness-only — pipecat itself gains no deps.
+    "praat-parselmouth>=0.4",
+    "pyyaml>=6",
+]
+
+# Use our local pipecat checkout (feat/lipsync-processor branch) instead of PyPI,
+# installed editable so changes under src/ apply without reinstalling.
+[tool.uv.sources]
+pipecat-ai = { path = "src", editable = true }

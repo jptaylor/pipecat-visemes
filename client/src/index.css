@@ -1,0 +1,64 @@
+:root {
+  --bg: #0b0e14;
+  --panel: #121722;
+  --panel-2: #0e131d;
+  --border: #232b3d;
+  --text: #dbe2f0;
+  --muted: #7d8aa5;
+  --accent: #4da3ff;
+
+  --openness: #ff6b6b;
+  --width: #51cf66;
+  --rounding: #74c0fc;
+  --energy: #fab005;
+  --energy-area: rgba(250, 176, 5, 0.12);
+  --pitch: #f783ac;
+  --confidence: #b197fc;
+
+  --closure: #ff8787;
+  --nasal: #ffd43b;
+  --silence: #748ffc;
+  --grid: #1a2233;
+
+  --lips: #c9556a;
+  --mouth-cavity: #33121e;
+  --teeth: #e8ecf3;
+  --tongue: #a8445c;
+
+  --sans: system-ui, "Segoe UI", Roboto, sans-serif;
+  --mono: ui-monospace, "SF Mono", Consolas, monospace;
+
+  font: 14px/1.45 var(--sans);
+  color-scheme: dark;
+  color: var(--text);
+  background: var(--bg);
+  -webkit-font-smoothing: antialiased;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+body {
+  margin: 0;
+  min-height: 100vh;
+}
+
+button {
+  font: inherit;
+  color: var(--text);
+  background: #1b2333;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 6px 14px;
+  cursor: pointer;
+}
+
+button:hover:not(:disabled) {
+  border-color: var(--accent);
+}
+
+button:disabled {
+  opacity: 0.5;
+  cursor: default;
+}

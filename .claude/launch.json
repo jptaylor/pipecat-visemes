@@ -1,0 +1,17 @@
+{
+  "version": "0.0.1",
+  "configurations": [
+    {
+      "name": "bot",
+      "runtimeExecutable": "uv",
+      "runtimeArgs": ["run", "bot.py"],
+      "port": 7860
+    },
+    {
+      "name": "client",
+      "runtimeExecutable": "npm",
+      "runtimeArgs": ["--prefix", "client", "run", "dev"],
+      "port": 5173
+    }
+  ]
+}
