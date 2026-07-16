@@ -455,13 +455,15 @@ def report(results: list[ClipResult], run_meta: dict, baseline: dict | None):
 
 
 def _src_sha() -> str:
+    # Lipsync code lives in this repo (formerly the pipecat fork at src/).
     try:
-        return subprocess.run(
-            ["git", "-C", "src", "rev-parse", "--short", "HEAD"],
+        sha = subprocess.run(
+            ["git", "rev-parse", "--short", "HEAD"],
             capture_output=True,
             text=True,
             timeout=5,
         ).stdout.strip()
+        return sha or "unknown"
     except Exception:
         return "unknown"
 
