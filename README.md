@@ -1,18 +1,26 @@
 # pipecat-visemes
 
-A standalone example application: **server-side lipsync / viseme analysis** for
-[Pipecat](https://github.com/pipecat-ai/pipecat) voice bots, built on released
-`pipecat-ai` (no fork). `LipsyncProcessor` sits between any `TTSService` and the
-output transport, analyzes streamed TTS audio, and emits playout-timed
-articulation keyframes; `LipsyncMessageRelay` (placed after
-`transport.output()`) delivers each batch to clients over the stock RTVI
-`server-message` channel with `data.type: "bot-tts-lipsync"` — no
-provider-specific requirements, no pipecat patches.
+Server-side lipsync for [Pipecat](https://github.com/pipecat-ai/pipecat) voice
+bots: the server analyzes streamed TTS audio and sends playout-timed
+articulation keyframes to the client, which renders an animated mouth — no
+audio analysis in the browser, no provider timestamp APIs.
 
-Full design: [plans/technical-specification.md](plans/technical-specification.md)
-Implementation guide: [plans/pipecat-implementation.md](plans/pipecat-implementation.md) — milestones, guardrails, per-module specs, unit tests, bot.py integration (historical: written for the in-tree pipecat layout; module paths now map to `lipsync/`)
-Benchmarks: [plans/benchmark-harness-accuracy.md](plans/benchmark-harness-accuracy.md) (signal accuracy vs Praat + corpus expectations) · [plans/benchmark-harness-performance.md](plans/benchmark-harness-performance.md) (TTS→RTVI latency, CPU/RSS budgets; not yet built)
-Accuracy tuning: [plans/accuracy-improvements.md](plans/accuracy-improvements.md) (pass 1, complete: 28.8 → 70.1) · [plans/accuracy-improvements-2.md](plans/accuracy-improvements-2.md) (pass 2, complete: 70.9, oracle-calibrated corpus, peak compression, hum onset)
+Goals:
+
+- **Provider-agnostic** — works with any `TTSService`; analysis runs on the PCM
+  stream itself, with no reliance on provider word/phoneme timestamps, viseme
+  events, or other side-channel metadata.
+- **No fork** — built on released `pipecat-ai` (~1.5.0) using only stock
+  extension points (frame processors, RTVI `server-message`).
+- **Playout-accurate** — keyframes ride the output transport's clock, staying
+  in sync with audio and discarded on interruption.
+
+Implementation: `LipsyncProcessor` sits between the TTS service and the output
+transport, running a formant-based analyzer (vendored LPC, formant, and pitch
+DSP — no dependencies beyond numpy) over the audio and emitting keyframe
+batches. `LipsyncMessageRelay`, placed after `transport.output()`, delivers
+each batch to clients as a standard RTVI `server-message` with
+`data.type: "bot-tts-lipsync"`.
 
 ## Layout
 
@@ -65,3 +73,17 @@ uv run python -m benchmarks.accuracy --offline --compare  # free re-score vs bas
 Scores the analyzer against Praat reference tracks (L1 formant Hz, L2 trajectory shape)
 and corpus expectations (L3 events) — see [plans/benchmark-harness-accuracy.md](plans/benchmark-harness-accuracy.md).
 Baseline: `server/benchmarks/results/baseline.json` (composite 70.9).
+
+## Further development
+
+The formant analyzer is Tier 0 of a planned analyzer ladder; all tiers emit the
+same keyframe/event wire format, so clients are unaffected by tier choice.
+
+- **Tier 1 — provider visemes:** consume Azure viseme events / Polly speech
+  marks via a TTS service hook; highest confidence where providers support it.
+- **Tier 2 — timestamp + G2P:** derive phonemes from word/char timestamps
+  (ElevenLabs, Cartesia) with grapheme-to-phoneme lookup.
+- **Tier 3 — phoneme model:** ONNX CTC phoneme recognition over the audio
+  stream (`onnxruntime` optional extra).
+- **Performance benchmark:** TTS→RTVI latency and CPU/RSS budget harness
+  (designed, not yet built).
