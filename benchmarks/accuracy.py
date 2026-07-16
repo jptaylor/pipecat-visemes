@@ -16,7 +16,7 @@ import json
 import subprocess
 import sys
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 
 import numpy as np
@@ -32,9 +32,9 @@ from benchmarks.common import (
     get_clip,
     load_corpus,
 )
-from pipecat.audio.lipsync.base_lipsync_analyzer import LipsyncAnalysisContext
-from pipecat.audio.lipsync.formant_lipsync_analyzer import FormantLipsyncAnalyzer
-from pipecat.audio.lipsync.types import LipsyncEventKind
+from lipsync.base_lipsync_analyzer import LipsyncAnalysisContext
+from lipsync.formant_lipsync_analyzer import FormantLipsyncAnalyzer
+from lipsync.types import LipsyncEventKind
 
 BASELINE_PATH = RESULTS_DIR / "baseline.json"
 
@@ -209,8 +209,14 @@ def compute_metrics(clip: Clip, keyframes, events, debug, ref: Reference) -> dic
     l1_f2 = ref.voiced & ours_voiced & np.isfinite(ref.f2) & (ours_f2 > 0)
     err_f1 = np.abs(ours_f1 - ref.f1)
     err_f2 = np.abs(ours_f2 - ref.f2)
-    add_windowed("f1_mae_hz", lambda w: float(np.mean(err_f1[l1 & w])) if (l1 & w).sum() >= 8 else float("nan"))
-    add_windowed("f2_mae_hz", lambda w: float(np.mean(err_f2[l1_f2 & w])) if (l1_f2 & w).sum() >= 8 else float("nan"))
+    add_windowed(
+        "f1_mae_hz",
+        lambda w: float(np.mean(err_f1[l1 & w])) if (l1 & w).sum() >= 8 else float("nan"),
+    )
+    add_windowed(
+        "f2_mae_hz",
+        lambda w: float(np.mean(err_f2[l1_f2 & w])) if (l1_f2 & w).sum() >= 8 else float("nan"),
+    )
     m["f1_r"] = _pearson(ours_f1[l1], ref.f1[l1])
     m["voicing_agreement"] = float(np.mean(ours_voiced == ref.voiced))
 
@@ -226,11 +232,18 @@ def compute_metrics(clip: Clip, keyframes, events, debug, ref: Reference) -> dic
         ref_open = _norm_track(ref.f1, l2)
         ref_width = _norm_track(ref.f2, ref.voiced & np.isfinite(ref.f2))
         add_windowed("openness_r", lambda w: _pearson(ours_open[l2 & w], ref_open[l2 & w]))
-        add_windowed("width_r", lambda w: _pearson(
-            ours_width[ref.voiced & np.isfinite(ref.f2) & w],
-            ref_width[ref.voiced & np.isfinite(ref.f2) & w],
-        ))
-        m["openness_mae"] = float(np.nanmean(np.abs(ours_open[l2] - ref_open[l2]))) if l2.sum() >= 8 else float("nan")
+        add_windowed(
+            "width_r",
+            lambda w: _pearson(
+                ours_width[ref.voiced & np.isfinite(ref.f2) & w],
+                ref_width[ref.voiced & np.isfinite(ref.f2) & w],
+            ),
+        )
+        m["openness_mae"] = (
+            float(np.nanmean(np.abs(ours_open[l2] - ref_open[l2])))
+            if l2.sum() >= 8
+            else float("nan")
+        )
 
         db_ok = np.isfinite(ref.intensity_db)
         m["energy_r"] = _pearson(ours_energy[db_ok], _norm_track(ref.intensity_db, db_ok)[db_ok])
@@ -328,12 +341,7 @@ def _component_values(results: list[ClipResult]) -> dict[str, float]:
         vals = [r.metrics.get(name, float("nan")) for r in results]
         values[name] = float(np.nanmean(vals)) if not np.all(np.isnan(vals)) else float("nan")
     for bucket in ("closure", "nasal", "silence"):
-        outcomes = [
-            ok
-            for r in results
-            for key, ok in r.checks.items()
-            if CHECKS[key][2] == bucket
-        ]
+        outcomes = [ok for r in results for key, ok in r.checks.items() if CHECKS[key][2] == bucket]
         values[f"checks_{bucket}"] = (sum(outcomes) / len(outcomes)) if outcomes else float("nan")
     return values
 
@@ -385,10 +393,20 @@ def report(results: list[ClipResult], run_meta: dict, baseline: dict | None):
 
     rows = []
     metric_names = [
-        "f1_mae_hz", "f2_mae_hz", "f1_r", "voicing_agreement",
-        "openness_r", "openness_mae", "width_r", "energy_r",
-        "convergence_s", "keyframe_rate", "keyframe_rate_speech", "mean_confidence",
-        "conf_on_accurate", "conf_on_inaccurate",
+        "f1_mae_hz",
+        "f2_mae_hz",
+        "f1_r",
+        "voicing_agreement",
+        "openness_r",
+        "openness_mae",
+        "width_r",
+        "energy_r",
+        "convergence_s",
+        "keyframe_rate",
+        "keyframe_rate_speech",
+        "mean_confidence",
+        "conf_on_accurate",
+        "conf_on_inaccurate",
     ]
     for name in metric_names:
         mean, std = _aggregate(results, name)
@@ -426,9 +444,7 @@ def report(results: list[ClipResult], run_meta: dict, baseline: dict | None):
     scored = sorted(results, key=lambda r: composite_score([r])[0])
     worst = ", ".join(f"{r.clip_label} ({composite_score([r])[0]:.1f})" for r in scored[:3])
     print(f"\nworst clips: {worst}")
-    failed = [
-        f"{r.clip_label}:{key}" for r in results for key, ok in r.checks.items() if not ok
-    ]
+    failed = [f"{r.clip_label}:{key}" for r in results for key, ok in r.checks.items() if not ok]
     if failed:
         print(f"failed checks: {', '.join(failed)}")
 
@@ -442,7 +458,9 @@ def _src_sha() -> str:
     try:
         return subprocess.run(
             ["git", "-C", "src", "rev-parse", "--short", "HEAD"],
-            capture_output=True, text=True, timeout=5,
+            capture_output=True,
+            text=True,
+            timeout=5,
         ).stdout.strip()
     except Exception:
         return "unknown"
@@ -468,7 +486,10 @@ async def run(args) -> dict:
         if args.warm:
             warm_clip = await get_clip(
                 next(s for s in sentences if s.id.startswith("harvard")),
-                voice, 1, offline=args.offline, refresh=False,
+                voice,
+                1,
+                offline=args.offline,
+                refresh=False,
             )
             warm_pcm, warm_rate = warm_clip.pcm, warm_clip.sample_rate
         for sentence in sentences:
@@ -503,7 +524,7 @@ async def run(args) -> dict:
 
     return {
         "run": {
-            "timestamp": datetime.now(timezone.utc).isoformat(),
+            "timestamp": datetime.now(UTC).isoformat(),
             "src_sha": _src_sha(),
             "provider": args.provider,
             "voices": [v.id for v in voices],
@@ -558,8 +579,7 @@ async def calibrate(args):
         print()
         for sentence_id, stats_list in per_sentence.items():
             bars = {
-                k: round(ORACLE_DISCOUNT * min(s[k] for s in stats_list), 2)
-                for k in stats_list[0]
+                k: round(ORACLE_DISCOUNT * min(s[k] for s in stats_list), 2) for k in stats_list[0]
             }
             print(f"  {sentence_id:12} suggested bars: {bars}")
 

@@ -8,16 +8,14 @@ import asyncio
 import json
 import os
 import wave
+from collections.abc import AsyncIterator
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
-from typing import AsyncIterator
 
 import numpy as np
 import yaml
 from dotenv import load_dotenv
-
-from pipecat.audio.lipsync.dsp import ANALYSIS_SAMPLE_RATE
 from pipecat.audio.utils import create_stream_resampler
 from pipecat.frames.frames import (
     EndFrame,
@@ -30,6 +28,8 @@ from pipecat.pipeline.pipeline import Pipeline
 from pipecat.pipeline.worker import PipelineParams, PipelineWorker
 from pipecat.processors.frame_processor import FrameDirection, FrameProcessor
 from pipecat.workers.runner import WorkerRunner
+
+from lipsync.dsp import ANALYSIS_SAMPLE_RATE
 
 load_dotenv(override=True)
 
@@ -230,7 +230,7 @@ async def get_clip(
                 "sample_rate": sample_rate,
                 "provider": voice.provider,
                 "voice": voice.id,
-                "created_at": datetime.now(timezone.utc).isoformat(),
+                "created_at": datetime.now(UTC).isoformat(),
             },
             indent=2,
         )

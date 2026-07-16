@@ -1,3 +1,4 @@
+import { PipecatClient } from "@pipecat-ai/client-js";
 import {
   PipecatClientAudio,
   PipecatClientProvider,
@@ -13,21 +14,28 @@ import { Mouth } from "./components/Mouth";
 import { StatsBar } from "./components/StatsBar";
 import { Timeline } from "./components/Timeline";
 import { LipsyncFeed } from "./lipsync/feed";
-import { LipsyncClient } from "./lipsync/LipsyncClient";
+import { parseLipsyncData } from "./lipsync/protocol";
 
 interface Session {
-  client: LipsyncClient;
+  client: PipecatClient;
   feed: LipsyncFeed;
 }
 
 function createSession(): Session {
   const feed = new LipsyncFeed();
-  const client = new LipsyncClient({
+  const client = new PipecatClient({
     transport: new SmallWebRTCTransport(),
     enableMic: true,
     enableCam: false,
+    callbacks: {
+      // Lipsync batches arrive as standard RTVI server-messages;
+      // parseLipsyncData demuxes on data.type === "bot-tts-lipsync".
+      onServerMessage: (data: unknown) => {
+        const batch = parseLipsyncData(data);
+        if (batch) feed.ingest(batch);
+      },
+    },
   });
-  client.onLipsyncBatch = (batch) => feed.ingest(batch);
   return { client, feed };
 }
 

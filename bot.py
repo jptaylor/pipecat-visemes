@@ -33,8 +33,6 @@ from pipecat.processors.aggregators.llm_response_universal import (
     LLMContextAggregatorPair,
     LLMUserAggregatorParams,
 )
-from pipecat.processors.audio.lipsync_processor import LipsyncProcessor
-from pipecat.processors.frameworks.rtvi import RTVIObserverParams
 from pipecat.runner.types import RunnerArguments
 from pipecat.runner.utils import create_transport
 from pipecat.services.cartesia.tts import CartesiaTTSService
@@ -43,6 +41,9 @@ from pipecat.services.openai.responses.llm import OpenAIResponsesLLMService
 from pipecat.transports.base_transport import BaseTransport, TransportParams
 from pipecat.transports.daily.transport import DailyParams
 from pipecat.workers.runner import WorkerRunner
+
+from lipsync.lipsync_processor import LipsyncProcessor
+from lipsync.rtvi import LipsyncMessageRelay
 
 load_dotenv(override=True)
 
@@ -79,9 +80,12 @@ async def run_bot(transport: BaseTransport, runner_args: RunnerArguments) -> Non
         ),
     )
 
-    # Lipsync: analyzes TTS audio and delivers playout-timed articulation
-    # keyframes to clients as bot-tts-lipsync RTVI messages.
+    # Lipsync: analyzes TTS audio and emits playout-timed articulation
+    # keyframes; the relay (placed after transport.output(), where the clock
+    # queue releases them at pts) delivers each batch to clients as a stock
+    # RTVI server-message with data.type "bot-tts-lipsync".
     lipsync = LipsyncProcessor()
+    lipsync_relay = LipsyncMessageRelay()
 
     context = LLMContext()
     user_aggregator, assistant_aggregator = LLMContextAggregatorPair(
@@ -99,6 +103,7 @@ async def run_bot(transport: BaseTransport, runner_args: RunnerArguments) -> Non
             tts,
             lipsync,
             transport.output(),
+            lipsync_relay,
             assistant_aggregator,
         ]
     )
@@ -110,7 +115,6 @@ async def run_bot(transport: BaseTransport, runner_args: RunnerArguments) -> Non
             enable_usage_metrics=True,
         ),
         observers=[],
-        rtvi_observer_params=RTVIObserverParams(bot_lipsync_enabled=True),
     )
 
     @worker.rtvi.event_handler("on_client_ready")

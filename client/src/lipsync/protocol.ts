@@ -1,10 +1,14 @@
 /**
- * Wire format of the custom `bot-tts-lipsync` RTVI server message.
+ * Wire format of the lipsync payload, delivered inside the standard RTVI
+ * `server-message`.
  *
- * Mirrors `LipsyncMessageData` in pipecat's rtvi/models.py: keyframes and
- * events are positional arrays for wire compaction, offsets are seconds from
- * the first audio of `ctx`, and `t0` is a base offset added to all offsets
- * (0 in version 1).
+ * Mirrors `lipsync_message_data` in the bot's lipsync/rtvi.py: the payload
+ * arrives as the `data` object passed to `onServerMessage`, with
+ * `type: "bot-tts-lipsync"` as the demux discriminator (other server
+ * messages are ignored by `parseLipsyncData`). Keyframes and events are
+ * positional arrays for wire compaction, offsets are seconds from the first
+ * audio of `ctx`, and `t0` is a base offset added to all offsets (0 in
+ * version 1).
  */
 
 export const LIPSYNC_MESSAGE_TYPE = "bot-tts-lipsync";
@@ -44,6 +48,7 @@ type EventTuple = [number, string, number, number];
 export function parseLipsyncData(data: unknown): LipsyncBatch | null {
   if (typeof data !== "object" || data === null) return null;
   const d = data as Record<string, unknown>;
+  if (d.type !== LIPSYNC_MESSAGE_TYPE) return null;
   const t0 = typeof d.t0 === "number" ? d.t0 : 0;
   const kf = Array.isArray(d.kf) ? (d.kf as KeyframeTuple[]) : [];
   const ev = Array.isArray(d.ev) ? (d.ev as EventTuple[]) : [];
