@@ -18,11 +18,11 @@ Accuracy tuning: [plans/accuracy-improvements.md](plans/accuracy-improvements.md
 
 | Path | Purpose |
 | --- | --- |
-| `lipsync/` | The lipsync package: types, vendored DSP (LPC/Levinson, formants, pitch, P² quantiles), formant (Tier 0) analyzer, `LipsyncProcessor`, app-local frames, RTVI server-message relay |
-| `bot.py` | Official `pipecat init quickstart` starter bot with the lipsync processor + relay wired in |
+| `server/lipsync/` | The lipsync package: types, vendored DSP (LPC/Levinson, formants, pitch, P² quantiles), formant (Tier 0) analyzer, `LipsyncProcessor`, app-local frames, RTVI server-message relay |
+| `server/bot.py` | Official `pipecat init quickstart` starter bot with the lipsync processor + relay wired in |
+| `server/tests/` | Unit tests (DSP, analyzer, processor, relay) |
+| `server/benchmarks/` | Accuracy harness (Praat reference + designed corpus) |
 | `client/` | Vite + React web client: connects over SmallWebRTC, parses lipsync server-messages, renders an animated mouth with timing/event inspectors |
-| `tests/` | Unit tests (DSP, analyzer, processor, relay) |
-| `benchmarks/` | Accuracy harness (Praat reference + designed corpus) |
 | `plans/` | Technical specification and implementation/tuning docs |
 
 ## How delivery works
@@ -39,9 +39,11 @@ Clients subscribe with the SDK's `onServerMessage` callback and demux on
 ## Setup
 
 ```bash
+cd server
 uv sync
 cp .env.example .env   # add DEEPGRAM_API_KEY, OPENAI_API_KEY, CARTESIA_API_KEY
 uv run bot.py          # bot + SmallWebRTC on http://localhost:7860
+
 npm --prefix client install
 npm --prefix client run dev   # viseme client on http://localhost:5173
 ```
@@ -49,19 +51,20 @@ npm --prefix client run dev   # viseme client on http://localhost:5173
 ## Tests
 
 ```bash
-uv run pytest
+cd server && uv run pytest
 ```
 
 ## Accuracy benchmark
 
 ```bash
+cd server
 uv run python -m benchmarks.accuracy                      # first run synthesizes fixtures (needs keys)
 uv run python -m benchmarks.accuracy --offline --compare  # free re-score vs baseline while tuning
 ```
 
 Scores the analyzer against Praat reference tracks (L1 formant Hz, L2 trajectory shape)
 and corpus expectations (L3 events) — see [plans/benchmark-harness-accuracy.md](plans/benchmark-harness-accuracy.md).
-Baseline: `benchmarks/results/baseline.json` (composite 70.9).
+Baseline: `server/benchmarks/results/baseline.json` (composite 70.9).
 
 ## History
 

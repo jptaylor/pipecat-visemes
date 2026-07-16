@@ -4,5 +4,6 @@ __pycache__/
 *.py[cod]
 .DS_Store
 .pytest_cache/
-benchmarks/fixtures/
-benchmarks/results/
+.ruff_cache/
+server/benchmarks/fixtures/
+server/benchmarks/results/
