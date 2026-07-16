@@ -10,9 +10,10 @@ import "./App.css";
 import { ConnectBar } from "./components/ConnectBar";
 import { EventLog } from "./components/EventLog";
 import { Meters } from "./components/Meters";
-import { Mouth } from "./components/Mouth";
+import { MouthCard } from "./components/MouthCard";
 import { StatsBar } from "./components/StatsBar";
 import { Timeline } from "./components/Timeline";
+import { TranscriptCard } from "./components/TranscriptCard";
 import { LipsyncFeed } from "./lipsync/feed";
 import { parseLipsyncData } from "./lipsync/protocol";
 
@@ -36,6 +37,8 @@ function createSession(): Session {
       },
     },
   });
+  // Dev-only hook for driving the mouth with synthetic batches from the console.
+  if (import.meta.env.DEV) Object.assign(window, { lipsyncFeed: feed });
   return { client, feed };
 }
 
@@ -53,7 +56,8 @@ export default function App() {
         <ConnectBar feed={feed} />
         <main className="grid">
           <section className="col">
-            <Mouth feed={feed} />
+            <TranscriptCard />
+            <MouthCard feed={feed} />
             <Meters feed={feed} />
           </section>
           <section className="col">

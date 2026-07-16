@@ -120,6 +120,34 @@
   margin-bottom: 8px;
 }
 
+/* ---- transcript ---- */
+
+.transcript {
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  padding: 12px 14px;
+}
+
+.transcript-text {
+  margin: 0;
+  font-size: 15px;
+  line-height: 1.55;
+  min-height: calc(3 * 1.55em);
+  max-height: calc(6 * 1.55em);
+  overflow-y: auto;
+}
+
+.transcript-empty {
+  color: var(--muted);
+  font-size: 12px;
+  min-height: calc(3 * 1.55em * 15 / 12);
+}
+
+.transcript-unspoken {
+  color: var(--muted);
+}
+
 /* ---- mouth ---- */
 
 .mouth-card {
@@ -169,6 +197,32 @@
   font-family: var(--mono);
   font-size: 11px;
   color: var(--muted);
+}
+
+/* ---- wireframe / toggle ---- */
+
+.mouth-switcher {
+  position: relative;
+}
+
+.mouth-toggle {
+  position: absolute;
+  top: 10px;
+  right: 12px;
+  font-family: var(--mono);
+  font-size: 11px;
+  padding: 2px 8px;
+  background: transparent;
+  border: 1px solid var(--border);
+  color: var(--muted);
+  border-radius: 4px;
+}
+
+/* aspect-ratio matches the SVG viewBox so toggling causes no layout jump */
+.mouth-canvas {
+  width: 100%;
+  aspect-ratio: 400 / 260;
+  display: block;
 }
 
 /* ---- meters ---- */
