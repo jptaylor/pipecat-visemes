@@ -10,8 +10,9 @@ Goals:
 - **Provider-agnostic** — works with any `TTSService`; analysis runs on the PCM
   stream itself, with no reliance on provider word/phoneme timestamps, viseme
   events, or other side-channel metadata.
-- **No fork** — built on released `pipecat-ai` (~1.5.0) using only stock
-  extension points (frame processors, RTVI `server-message`).
+- **No fork** — built on released `pipecat-ai` (~1.10.0) using only stock
+  extension points (frame processors, RTVI `server-message`); nothing in the
+  framework is subclassed or patched.
 - **Playout-accurate** — keyframes ride the output transport's clock, staying
   in sync with audio and discarded on interruption.
 
@@ -28,10 +29,10 @@ each batch to clients as a standard RTVI `server-message` with
 | -------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `server/lipsync/`    | The lipsync package: types, vendored DSP (LPC/Levinson, formants, pitch, P² quantiles), formant (Tier 0) analyzer, `LipsyncProcessor`, app-local frames, RTVI server-message relay |
 | `server/bot.py`      | Official `pipecat init quickstart` starter bot with the lipsync processor + relay wired in                                                                                         |
-| `server/tests/`      | Unit tests (DSP, analyzer, processor, relay)                                                                                                                                       |
+| `server/tests/`      | Unit tests (DSP, analyzer, processor, relay, end-to-end through a headless output transport)                                                                                       |
 | `server/benchmarks/` | Accuracy harness (Praat reference + designed corpus)                                                                                                                               |
 | `client/`            | Vite + React web client: connects over SmallWebRTC, parses lipsync server-messages, renders an animated mouth with timing/event inspectors                                         |
-| `plans/`             | Technical specification and implementation/tuning docs                                                                                                                             |
+| `plans/`             | Technical specification, implementation/tuning docs, and update notes                                                                                                              |
 
 ## How delivery works
 
@@ -43,6 +44,19 @@ playout-timed; it wraps the batch in an `RTVIServerMessageFrame`, which the
 stock `RTVIObserver` forwards to the client as a standard `server-message`.
 Clients subscribe with the SDK's `onServerMessage` callback and demux on
 `data.type === "bot-tts-lipsync"` (see `client/src/lipsync/protocol.ts`).
+
+Timing follows the audio, not the arrival of frames:
+
+- A context's first sample is anchored at `max(now, end of already-queued
+  audio)`, so an utterance queued behind another one is scheduled where that
+  audio ends.
+- If the transport runs out of a context's audio before more arrives (the LLM
+  stalled mid-response; pipecat ≥ 1.8 keeps one TTS context per turn), later
+  batches are shifted by the gap and never straddle it. The shift travels on
+  the wire as `t0`, which the client adds to that batch's offsets.
+- A TTS service that reopens a context id it already closed (the same id after
+  its idle timeout) starts a new segment with offsets from zero; the client
+  re-anchors when offsets regress within one `ctx`.
 
 ## Setup
 
@@ -87,3 +101,8 @@ same keyframe/event wire format, so clients are unaffected by tier choice.
   stream (`onnxruntime` optional extra).
 - **Performance benchmark:** TTS→RTVI latency and CPU/RSS budget harness
   (designed, not yet built).
+
+## License
+
+BSD 2-Clause, the same license as [Pipecat](https://github.com/pipecat-ai/pipecat).
+See [LICENSE](LICENSE).

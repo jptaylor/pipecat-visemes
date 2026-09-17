@@ -31,12 +31,18 @@ class TTSLipsyncFrame(DataFrame):
     scheduling lead — exactly like word timestamps. On interruption, unplayed
     frames are discarded along with the corresponding audio.
 
-    Offsets are seconds from the first audio of ``context_id``.
+    Offsets are seconds of audio from the first sample of ``context_id``. If
+    the transport ran out of the context's audio partway through (e.g. the LLM
+    stalled mid-response), audio after the gap plays later than its offset
+    implies; ``playout_offset`` carries that shift for this window.
 
     Parameters:
         context_id: TTS context the audio was measured from.
         window_start: Window start in seconds from context start (inclusive).
         window_end: Window end in seconds from context start (exclusive).
+        playout_offset: Seconds to add to this window's offsets to get playout
+            time relative to the context's first sample; zero unless playout
+            gapped earlier in the context.
         keyframes: Continuous articulation keyframes within the window.
         events: Discrete closure/nasal/silence events within the window.
     """
@@ -44,6 +50,7 @@ class TTSLipsyncFrame(DataFrame):
     context_id: str | None = None
     window_start: float = 0.0
     window_end: float = 0.0
+    playout_offset: float = 0.0
     keyframes: list[LipsyncKeyframe] = field(default_factory=list)
     events: list[LipsyncEvent] = field(default_factory=list)
 

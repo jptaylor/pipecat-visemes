@@ -37,8 +37,6 @@ function createSession(): Session {
       },
     },
   });
-  // Dev-only hook for driving the mouth with synthetic batches from the console.
-  if (import.meta.env.DEV) Object.assign(window, { lipsyncFeed: feed });
   return { client, feed };
 }
 
@@ -49,6 +47,10 @@ type ProviderClient = ComponentProps<typeof PipecatClientProvider>["client"];
 
 export default function App() {
   const [{ client, feed }] = useState(createSession);
+  // Dev-only hook for driving the mouth with synthetic batches from the
+  // console. Assigned here rather than in createSession so it always points
+  // at the session React kept (StrictMode runs the initializer twice).
+  if (import.meta.env.DEV) Object.assign(window, { lipsyncFeed: feed });
 
   return (
     <PipecatClientProvider client={client as unknown as ProviderClient} autoInitDevices>

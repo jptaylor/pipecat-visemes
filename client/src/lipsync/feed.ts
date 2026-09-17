@@ -101,6 +101,7 @@ export class LipsyncFeed {
   private kfs: LipsyncKeyframe[] = [];
   private evs: LipsyncEvent[] = [];
   private cursor = 0;
+  private maxOffset = -Infinity;
   private msgTimes: number[] = [];
   private kfTimes: number[] = [];
   private totalMessages = 0;
@@ -121,13 +122,18 @@ export class LipsyncFeed {
 
     const impliedAnchor = now + SCHEDULING_LEAD_SEC * 1000 - first * 1000;
     let anchor = this.anchorMs;
-    if (batch.ctx !== this.ctx || anchor === null) {
+    // Batches within one utterance cover contiguous windows, so offsets only
+    // ever advance. A regression means the server reopened the same TTS
+    // context id (offsets restart at 0): treat it as a new utterance.
+    const restarted = first < this.maxOffset - 1e-3;
+    if (batch.ctx !== this.ctx || anchor === null || restarted) {
       // New utterance (or first ever): drop the old queue and re-anchor.
       this.ctx = batch.ctx;
       anchor = impliedAnchor;
       this.kfs = [];
       this.evs = [];
       this.cursor = 0;
+      this.maxOffset = -Infinity;
     } else if (impliedAnchor < anchor - 1) {
       // A batch arriving with more lead implies an earlier true anchor;
       // late batches (network jitter, pts clamping) never move it.
@@ -138,6 +144,8 @@ export class LipsyncFeed {
     this.lastLeadMs = anchor + first * 1000 - now;
 
     this.kfs.push(...batch.keyframes);
+    for (const k of batch.keyframes) this.maxOffset = Math.max(this.maxOffset, k.offset);
+    for (const e of batch.events) this.maxOffset = Math.max(this.maxOffset, e.offset);
     for (const e of batch.events) {
       this.evs.push(e);
       // wallMs is the event's scheduled playback time, not its arrival time.
@@ -250,6 +258,7 @@ export class LipsyncFeed {
     this.kfs = [];
     this.evs = [];
     this.cursor = 0;
+    this.maxOffset = -Infinity;
     this.lastLeadMs = null;
     this.lastBatch = null;
     this.notify();

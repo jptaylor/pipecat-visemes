@@ -448,7 +448,6 @@ class FormantLipsyncAnalyzer(BaseLipsyncAnalyzer):
         else:
             f1_present = False
             f2_damped = False
-        plausible = f1_found and f2_found
 
         # Bounded hold: after a few empty frames, drift a stale slot toward
         # its prior center instead of freezing an old shape indefinitely.

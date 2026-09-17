@@ -11,6 +11,7 @@ from pipecat.frames.frames import (
     ErrorFrame,
     Frame,
     InterruptionFrame,
+    StartFrame,
     TTSAudioRawFrame,
     TTSStartedFrame,
     TTSStoppedFrame,
@@ -18,6 +19,8 @@ from pipecat.frames.frames import (
 from pipecat.pipeline.pipeline import Pipeline
 from pipecat.processors.frameworks.rtvi import RTVIServerMessageFrame
 from pipecat.tests.utils import SleepFrame, run_test
+from pipecat.transports.base_output import BaseOutputTransport
+from pipecat.transports.base_transport import TransportParams
 
 from lipsync.base_lipsync_analyzer import (
     BaseLipsyncAnalyzer,
@@ -58,10 +61,40 @@ def lipsync_frames(received, context_id=None) -> list[TTSLipsyncFrame]:
     return frames
 
 
+def server_messages(received) -> list[RTVIServerMessageFrame]:
+    return [f for f in received if isinstance(f, RTVIServerMessageFrame)]
+
+
 def flat_keyframes(frames) -> list[tuple]:
     return [
         (round(k.offset, 6), k.openness, k.width, k.rounding) for f in frames for k in f.keyframes
     ]
+
+
+def make_lipsync_frame() -> TTSLipsyncFrame:
+    frame = TTSLipsyncFrame(
+        context_id="ctx-1",
+        window_start=0.0,
+        window_end=0.2,
+        keyframes=[
+            LipsyncKeyframe(
+                offset=0.123456,
+                openness=0.512345,
+                width=0.448,
+                rounding=0.101,
+                energy=0.666,
+                pitch=0.333,
+                confidence=0.912,
+            )
+        ],
+        events=[
+            LipsyncEvent(
+                offset=0.15987, kind=LipsyncEventKind.CLOSURE, duration=0.08123, confidence=0.8
+            )
+        ],
+    )
+    frame.pts = 1
+    return frame
 
 
 class _FailingAnalyzer(BaseLipsyncAnalyzer):
@@ -80,32 +113,31 @@ class _FailingAnalyzer(BaseLipsyncAnalyzer):
         pass
 
 
+class _HeadlessOutputTransport(BaseOutputTransport):
+    """An output transport with no device behind it.
+
+    Audio is accepted and dropped; timed frames go through the real clock
+    queue and are re-pushed downstream at their presentation time.
+    """
+
+    def __init__(self):
+        super().__init__(TransportParams(audio_out_enabled=True))
+
+    async def start(self, frame: StartFrame):
+        await super().start(frame)
+        await self.set_transport_ready(frame)
+
+    async def write_audio_frame(self, frame) -> bool:
+        return True
+
+
 class TestLipsyncScaffolding(unittest.TestCase):
     """Smoke tests that the lipsync frames, params and processor construct."""
 
     def test_lipsync_frame_constructs(self):
-        frame = TTSLipsyncFrame(
-            context_id="ctx-1",
-            window_start=0.0,
-            window_end=0.2,
-            keyframes=[
-                LipsyncKeyframe(
-                    offset=0.1,
-                    openness=0.5,
-                    width=0.5,
-                    rounding=0.2,
-                    energy=0.4,
-                    pitch=0.3,
-                    confidence=0.9,
-                )
-            ],
-            events=[
-                LipsyncEvent(
-                    offset=0.15, kind=LipsyncEventKind.CLOSURE, duration=0.08, confidence=0.8
-                )
-            ],
-        )
-        self.assertIsNone(frame.pts)
+        frame = make_lipsync_frame()
+        self.assertEqual(frame.pts, 1)
+        self.assertEqual(frame.playout_offset, 0.0)
         self.assertEqual(len(frame.keyframes), 1)
         self.assertEqual(frame.events[0].kind, "closure")
 
@@ -133,8 +165,10 @@ class TestLipsyncProcessor(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(lipsync)
         self.assertTrue(all(f.context_id == "ctx-1" for f in lipsync))
         self.assertTrue(all(f.pts for f in lipsync))
+        self.assertTrue(all(f.playout_offset == 0.0 for f in lipsync))
         self.assertEqual([f.pts for f in lipsync], sorted(f.pts for f in lipsync))
         self.assertEqual(processor.stats["batches_emitted"], len(lipsync))
+        self.assertEqual(processor.stats["playout_gaps"], 0)
 
     async def test_output_invariant_to_ingest_chunking(self):
         pcm = synth_vowel(700, 1200, secs=1.0)
@@ -223,6 +257,70 @@ class TestLipsyncProcessor(unittest.IsolatedAsyncioTestCase):
         all_lipsync = lipsync_frames(received_down)
         self.assertEqual([f.pts for f in all_lipsync], sorted(f.pts for f in all_lipsync))
 
+    async def test_queued_context_is_anchored_after_the_previous_audio(self):
+        # ctx-2's audio arrives while ctx-1 (1.5 s) is still playing, so its
+        # batches must be scheduled after ctx-1's audio ends, not at arrival.
+        frames = [
+            *make_tts_frames(synth_vowel(700, 1200, secs=1.5), "ctx-1"),
+            *make_tts_frames(synth_vowel(300, 2300, secs=0.7), "ctx-2"),
+        ]
+        processor = LipsyncProcessor()
+        received_down, _ = await run_test(processor, frames_to_send=frames)
+
+        first = lipsync_frames(received_down, "ctx-1")
+        second = lipsync_frames(received_down, "ctx-2")
+        self.assertTrue(first and second)
+        gap_ns = second[0].pts - first[0].pts
+        # ctx-2's first batch is due 1.5 s after ctx-1's, less ctx-1's first
+        # batch being clamped to its emission time (well under 0.3 s); if
+        # ctx-2 were anchored at arrival instead, the gap would be ~0.
+        self.assertGreater(gap_ns, 1.0e9)
+        self.assertLess(gap_ns, 1.5e9)
+
+    async def test_reopened_context_id_starts_a_new_segment(self):
+        # pipecat >= 1.8 reuses one context id per turn and reopens it after
+        # its idle timeout: Started/Stopped for the same id, twice.
+        frames = [
+            *make_tts_frames(synth_vowel(700, 1200, secs=0.8), "ctx-1"),
+            SleepFrame(sleep=0.2),
+            *make_tts_frames(synth_vowel(300, 2300, secs=0.8), "ctx-1"),
+        ]
+        processor = LipsyncProcessor()
+        received_down, _ = await run_test(processor, frames_to_send=frames)
+
+        lipsync = lipsync_frames(received_down, "ctx-1")
+        self.assertEqual([f.window_start for f in lipsync].count(0.0), 2)
+        self.assertEqual(processor.stats["contexts_opened"], 2)
+        self.assertEqual([f.pts for f in lipsync], sorted(f.pts for f in lipsync))
+        for frame in lipsync:
+            for keyframe in frame.keyframes:
+                self.assertLessEqual(keyframe.offset, 0.85)
+
+    async def test_playout_gap_shifts_later_batches(self):
+        # 0.5 s of audio, then a stall longer than its playout: the audio
+        # after the stall plays when it arrives, so its batches are shifted
+        # and reported with a nonzero playout offset.
+        pcm = synth_vowel(700, 1200, secs=0.5)
+        head = make_tts_frames(pcm, "ctx-1")[:-1]  # no Stopped
+        tail = make_tts_frames(synth_vowel(300, 2300, secs=0.8), "ctx-1")[1:]  # no Started
+        frames = [*head, SleepFrame(sleep=0.9), *tail]
+
+        processor = LipsyncProcessor()
+        received_down, _ = await run_test(processor, frames_to_send=frames)
+
+        self.assertEqual(processor.stats["playout_gaps"], 1)
+        lipsync = lipsync_frames(received_down, "ctx-1")
+        before = [f for f in lipsync if f.window_end <= 0.5]
+        after = [f for f in lipsync if f.window_start >= 0.5]
+        self.assertEqual(len(before) + len(after), len(lipsync))  # none straddle the gap
+        self.assertTrue(before and after)
+        self.assertTrue(all(f.playout_offset == 0.0 for f in before))
+        # The stall was ~0.4 s beyond the buffered audio (0.9 s sleep - 0.5 s playout).
+        for frame in after:
+            self.assertGreater(frame.playout_offset, 0.2)
+            self.assertLess(frame.playout_offset, 1.0)
+        self.assertEqual([f.pts for f in lipsync], sorted(f.pts for f in lipsync))
+
     async def test_stale_context_audio_ignored(self):
         frames = make_tts_frames(synth_vowel(700, 1200, secs=0.5), "ghost")[1:-1]  # audio only
         processor = LipsyncProcessor()
@@ -260,40 +358,23 @@ class TestLipsyncProcessor(unittest.IsolatedAsyncioTestCase):
 class TestLipsyncMessageRelay(unittest.IsolatedAsyncioTestCase):
     """The relay sits after transport.output(), so every TTSLipsyncFrame it
     receives has already been released from the transport's clock queue at
-    pts. Playout timing is therefore a pipeline-placement property — covered
-    by live verification (message lead vs audio), not unit-testable here.
+    pts (see the end-to-end test below).
     """
 
-    def _make_lipsync_frame(self):
-        frame = TTSLipsyncFrame(
-            context_id="ctx-1",
-            window_start=0.0,
-            window_end=0.2,
-            keyframes=[
-                LipsyncKeyframe(
-                    offset=0.123456,
-                    openness=0.512345,
-                    width=0.448,
-                    rounding=0.101,
-                    energy=0.666,
-                    pitch=0.333,
-                    confidence=0.912,
-                )
-            ],
-            events=[
-                LipsyncEvent(
-                    offset=0.15987, kind=LipsyncEventKind.CLOSURE, duration=0.08123, confidence=0.8
-                )
-            ],
-        )
-        frame.pts = 1
-        return frame
+    EXPECTED_DATA = {
+        "type": "bot-tts-lipsync",
+        "version": 1,
+        "ctx": "ctx-1",
+        "t0": 0.0,
+        "kf": [[0.12, 0.51, 0.45, 0.1, 0.67, 0.33, 0.91]],
+        "ev": [[0.16, "closure", 0.08, 0.8]],
+    }
 
     async def test_relays_quantized_server_message(self):
-        frame = self._make_lipsync_frame()
+        frame = make_lipsync_frame()
         received_down, _ = await run_test(LipsyncMessageRelay(), frames_to_send=[frame])
 
-        messages = [f for f in received_down if isinstance(f, RTVIServerMessageFrame)]
+        messages = server_messages(received_down)
         self.assertEqual(len(messages), 1)
         # The original frame is forwarded, with the message following it.
         frame_index = next(i for i, f in enumerate(received_down) if f.id == frame.id)
@@ -301,40 +382,55 @@ class TestLipsyncMessageRelay(unittest.IsolatedAsyncioTestCase):
             i for i, f in enumerate(received_down) if isinstance(f, RTVIServerMessageFrame)
         )
         self.assertGreater(message_index, frame_index)
-        self.assertEqual(
-            messages[0].data,
-            {
-                "type": "bot-tts-lipsync",
-                "version": 1,
-                "ctx": "ctx-1",
-                "t0": 0.0,
-                "kf": [[0.12, 0.51, 0.45, 0.1, 0.67, 0.33, 0.91]],
-                "ev": [[0.16, "closure", 0.08, 0.8]],
-            },
-        )
+        self.assertEqual(messages[0].data, self.EXPECTED_DATA)
+
+    async def test_playout_offset_is_reported_as_t0(self):
+        frame = make_lipsync_frame()
+        frame.playout_offset = 0.4321
+        received_down, _ = await run_test(LipsyncMessageRelay(), frames_to_send=[frame])
+        self.assertEqual(server_messages(received_down)[0].data["t0"], 0.43)
 
     async def test_passthrough_forwards_all_frames(self):
         frames = make_tts_frames(synth_vowel(700, 1200, secs=0.1), "ctx-1")
-        frames.insert(2, self._make_lipsync_frame())
+        frames.insert(2, make_lipsync_frame())
         received_down, _ = await run_test(LipsyncMessageRelay(), frames_to_send=frames)
 
         sent_ids = [f.id for f in frames]
         got_ids = [f.id for f in received_down if f.id in set(sent_ids)]
         self.assertEqual(got_ids, sent_ids)  # same objects, same order
-        messages = [f for f in received_down if isinstance(f, RTVIServerMessageFrame)]
-        self.assertEqual(len(messages), 1)
+        self.assertEqual(len(server_messages(received_down)), 1)
 
     async def test_processor_to_relay_pipeline(self):
         pipeline = Pipeline([LipsyncProcessor(), LipsyncMessageRelay()])
         frames = make_tts_frames(synth_vowel(700, 1200, secs=1.0), "ctx-1")
         received_down, _ = await run_test(pipeline, frames_to_send=frames)
 
-        messages = [f for f in received_down if isinstance(f, RTVIServerMessageFrame)]
+        messages = server_messages(received_down)
         self.assertTrue(messages)
         for message in messages:
             self.assertEqual(message.data["type"], "bot-tts-lipsync")
             self.assertEqual(message.data["ctx"], "ctx-1")
             self.assertTrue(all(len(row) == 7 for row in message.data["kf"]))
+
+    async def test_end_to_end_through_an_output_transport(self):
+        # Processor → transport clock queue → relay: every batch becomes
+        # exactly one server message, after the transport released it at pts.
+        transport = _HeadlessOutputTransport()
+        pipeline = Pipeline([LipsyncProcessor(), transport, LipsyncMessageRelay()])
+        frames = make_tts_frames(synth_vowel(700, 1200, secs=1.0), "ctx-1")
+        received_down, _ = await run_test(pipeline, frames_to_send=frames, start_timeout=5.0)
+
+        released = lipsync_frames(received_down)
+        self.assertTrue(released)
+        self.assertEqual([f.pts for f in released], sorted(f.pts for f in released))
+        messages = server_messages(received_down)
+        self.assertEqual(len(messages), len(released))
+        for frame, message in zip(released, messages):
+            frame_index = received_down.index(frame)
+            message_index = received_down.index(message)
+            self.assertGreater(message_index, frame_index)
+            self.assertEqual(message.data["ctx"], "ctx-1")
+            self.assertEqual(len(message.data["kf"]), len(frame.keyframes))
 
 
 if __name__ == "__main__":

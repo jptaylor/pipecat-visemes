@@ -37,9 +37,10 @@ def lipsync_message_data(frame: TTSLipsyncFrame) -> dict:
     keep the wire size small, with floats quantized to two decimals (client-
     side smoothing makes finer precision meaningless). Keyframe order is
     ``[offset, openness, width, rounding, energy, pitch, confidence]``; event
-    order is ``[offset, kind, duration, confidence]``. Offsets are seconds
-    from the first audio of ``ctx``; ``t0`` is a base offset added to all
-    offsets (0 in version 1). The schema is versioned: higher-fidelity
+    order is ``[offset, kind, duration, confidence]``. Offsets are seconds of
+    audio from the first sample of ``ctx``; ``t0`` is a playout shift the
+    client adds to all offsets (nonzero only after the bot's audio stalled
+    partway through the context). The schema is versioned: higher-fidelity
     analysis tiers may add fields under a ``version`` bump.
     """
 
@@ -50,7 +51,7 @@ def lipsync_message_data(frame: TTSLipsyncFrame) -> dict:
         "type": LIPSYNC_MESSAGE_TYPE,
         "version": 1,
         "ctx": frame.context_id,
-        "t0": 0.0,
+        "t0": q(frame.playout_offset),
         "kf": [
             [
                 q(k.offset),

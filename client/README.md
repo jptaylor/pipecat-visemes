@@ -1,32 +1,28 @@
-# React + TypeScript + Vite
+# Viseme client
 
-This template provides a minimal setup to get React working in Vite with HMR and some Oxlint rules.
+Vite + React web client for the lipsync bot in `../server`. It connects over
+SmallWebRTC with the stock `PipecatClient`, receives lipsync batches as RTVI
+`server-message`s (`data.type === "bot-tts-lipsync"`), and renders an animated
+mouth with timing and event inspectors and a word-synced transcript.
 
-Currently, two official plugins are available:
-
-- [@vitejs/plugin-react](https://github.com/vitejs/vite-plugin-react/blob/main/packages/plugin-react) uses [Oxc](https://oxc.rs)
-- [@vitejs/plugin-react-swc](https://github.com/vitejs/vite-plugin-react/blob/main/packages/plugin-react-swc) uses [SWC](https://swc.rs/)
-
-## React Compiler
-
-The React Compiler is not enabled on this template because of its impact on dev & build performances. To add it, see [this documentation](https://react.dev/learn/react-compiler/installation).
-
-## Expanding the Oxlint configuration
-
-If you are developing a production application, we recommend enabling type-aware lint rules by installing `oxlint-tsgolint` and editing `.oxlintrc.json`:
-
-```json
-{
-  "$schema": "./node_modules/oxlint/configuration_schema.json",
-  "plugins": ["react", "typescript", "oxc"],
-  "options": {
-    "typeAware": true
-  },
-  "rules": {
-    "react/rules-of-hooks": "error",
-    "react/only-export-components": ["warn", { "allowConstantExport": true }]
-  }
-}
+```bash
+npm install
+npm run dev      # http://localhost:5173 (proxies /api to the bot on :7860)
+npm run build    # tsc -b && vite build
+npm run lint     # oxlint
 ```
 
-See the [Oxlint rules documentation](https://oxc.rs/docs/guide/usage/linter/rules) for the full list of rules and categories.
+Start the bot first (`cd ../server && uv run bot.py`).
+
+## Layout
+
+| Path                              | Purpose                                                                               |
+| --------------------------------- | ------------------------------------------------------------------------------------- |
+| `src/App.tsx`                     | Client setup (`onServerMessage` → `parseLipsyncData` → `LipsyncFeed`) and page layout |
+| `src/lipsync/protocol.ts`         | Wire format of the lipsync payload and its parser                                     |
+| `src/lipsync/feed.ts`             | Buffers batches, anchors them on the wall clock, interpolates the mouth pose          |
+| `src/components/`                 | Mouth, timeline, meters, event log, stats bar, transcript card                        |
+| `src/hooks/useKaraokeTranscript.ts` | Word-level spoken progress from the SDK's `bot-output` events                       |
+
+In development `window.lipsyncFeed` exposes the feed so synthetic batches can be
+fed from the console.

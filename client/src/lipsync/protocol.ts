@@ -2,13 +2,13 @@
  * Wire format of the lipsync payload, delivered inside the standard RTVI
  * `server-message`.
  *
- * Mirrors `lipsync_message_data` in the bot's lipsync/rtvi.py: the payload
- * arrives as the `data` object passed to `onServerMessage`, with
+ * Mirrors `lipsync_message_data` in the bot's lipsync/rtvi.py: the payload arrives
+ * as the `data` object passed to `onServerMessage`, with
  * `type: "bot-tts-lipsync"` as the demux discriminator (other server
  * messages are ignored by `parseLipsyncData`). Keyframes and events are
- * positional arrays for wire compaction, offsets are seconds from the first
- * audio of `ctx`, and `t0` is a base offset added to all offsets (0 in
- * version 1).
+ * positional arrays for wire compaction, offsets are seconds of audio from
+ * the first sample of `ctx`, and `t0` is a playout shift added to all
+ * offsets (nonzero only after the bot's audio stalled mid-utterance).
  */
 
 export const LIPSYNC_MESSAGE_TYPE = "bot-tts-lipsync";
