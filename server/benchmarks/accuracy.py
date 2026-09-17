@@ -14,6 +14,7 @@ import argparse
 import ast
 import asyncio
 import json
+import os
 import subprocess
 import sys
 from dataclasses import dataclass, field
@@ -32,6 +33,7 @@ from benchmarks.common import (
     chunks_16k_float32,
     get_clip,
     load_corpus,
+    teardowns_pending,
 )
 from lipsync import dsp, formant_lipsync_analyzer
 from lipsync.base_lipsync_analyzer import LipsyncAnalysisContext
@@ -39,6 +41,12 @@ from lipsync.formant_lipsync_analyzer import FormantLipsyncAnalyzer
 from lipsync.types import LipsyncEventKind
 
 BASELINE_PATH = RESULTS_DIR / "baseline.json"
+
+
+def baseline_path(provider: str) -> Path:
+    """One baseline per provider (``baseline.json`` is the Cartesia corpus)."""
+    return BASELINE_PATH if provider == "cartesia" else RESULTS_DIR / f"baseline-{provider}.json"
+
 
 # Post-convergence window start: metrics are reported for the full clip and
 # for t >= this, isolating adaptive-normalization warmup cost.
@@ -698,7 +706,13 @@ def main():
     parser.add_argument("--refresh", action="store_true", help="re-synthesize fixtures")
     parser.add_argument("--warm", action="store_true", help="pre-converge analyzer per voice")
     parser.add_argument("--save-baseline", action="store_true")
-    parser.add_argument("--compare", nargs="?", const=str(BASELINE_PATH), default=None)
+    parser.add_argument(
+        "--compare",
+        nargs="?",
+        const="",
+        default=None,
+        help="baseline JSON to diff against (default: this provider's saved baseline)",
+    )
     parser.add_argument(
         "--set",
         action="append",
@@ -731,15 +745,18 @@ def main():
         asyncio.run(calibrate(args))
         return
 
-    payload, results = asyncio.run(run(args))
+    # Not asyncio.run: closing the loop would wait on detached TTS teardowns
+    # (see common.synthesize), which can take minutes after a synthesis run.
+    loop = asyncio.new_event_loop()
+    payload, results = loop.run_until_complete(run(args))
 
     baseline = None
-    if args.compare:
-        baseline_path = Path(args.compare)
-        if baseline_path.exists():
-            baseline = json.loads(baseline_path.read_text())
+    if args.compare is not None:
+        compare_path = Path(args.compare) if args.compare else baseline_path(args.provider)
+        if compare_path.exists():
+            baseline = json.loads(compare_path.read_text())
         else:
-            print(f"no baseline at {baseline_path}; reporting without comparison")
+            print(f"no baseline at {compare_path}; reporting without comparison")
 
     report(results, payload["run"], baseline)
 
@@ -749,8 +766,14 @@ def main():
     out_path.write_text(json.dumps(payload, indent=2))
     print(f"\nresults: {out_path.relative_to(Path.cwd())}")
     if args.save_baseline:
-        BASELINE_PATH.write_text(json.dumps(payload, indent=2))
-        print(f"baseline: {BASELINE_PATH.relative_to(Path.cwd())}")
+        save_path = baseline_path(args.provider)
+        save_path.write_text(json.dumps(payload, indent=2))
+        print(f"baseline: {save_path.relative_to(Path.cwd())}")
+
+    if teardowns_pending():
+        sys.stdout.flush()
+        os._exit(0)
+    loop.close()
 
 
 if __name__ == "__main__":

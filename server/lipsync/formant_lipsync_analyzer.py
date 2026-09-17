@@ -93,6 +93,14 @@ _SPEECH_HIST_HOPS = _SPEECH_WINDOW_HOPS + int(_CLOSURE_MAX_SEC / HOP_SECONDS) + 
 _NASAL_CENTROID_MAX_HZ = 1000.0
 _NASAL_LOW_RATIO_MIN = 0.6
 _NASAL_F2_MAX_BANDWIDTH_HZ = 300.0
+# When a missing F2 root counts as "damped": "always", "dark" (only above
+# _NASAL_DARK_RATIO) or "never". Voice-dependent at LPC order 16: one corpus
+# voice's murmur always has a narrow ~1.9 kHz root (caught by the spurious-F2
+# rule, so "never" would cut false nasal closures on nasal-free speech from
+# 28 % to 9 % of voiced hops), the other's has none and loses its hums
+# without this rule. Keep "always" until a cue that separates murmurs from
+# close vowels exists (plans/deep-review-2026-09-results.md).
+_NASAL_MISSING_F2_DAMPED = "always"
 _NASAL_DARK_RATIO = 0.9
 _NASAL_SPURIOUS_F2_HZ = 1200.0
 _NASAL_HYSTERESIS_HOPS = 2
@@ -126,7 +134,11 @@ _FORMANT_DELTA_HZ = 300.0
 _C_LPC_FLOOR = 0.3
 _C_SLOT_PARTIAL = 0.5
 _SNR_FULL_DB = 20.0
-_C_FIT_LOG10_FULL = 3.0  # prediction gain 10^3 -> full fit confidence
+# log10(prediction gain) that earns full fit confidence. Tied to dsp.LPC_ORDER:
+# gain rises with order (median log10 gain on Praat-voiced hops 1.27 -> 1.38
+# and 1.44 -> 1.49 on the two corpus voices from order 12 to 16), so 3.0 at
+# order 12 became 3.2 to keep c_fit's distribution where it was.
+_C_FIT_LOG10_FULL = 3.2
 
 
 def _clamp01(value: float) -> float:
@@ -151,12 +163,21 @@ class LipsyncDebugFrame:
         f1: Raw first formant in Hz (0.0 = not found this hop).
         f2: Raw second formant in Hz.
         f3: Raw third formant in Hz.
+        f2_bandwidth: Bandwidth of the F2 root in Hz (0.0 = no F2 this hop).
+        f1_broad: Broad F1-band root used for mapping when the strict F1 slot
+            is empty (0.0 = none).
         pitch_hz: Raw pitch in Hz (0.0 when unvoiced).
         voiced: Whether the hop was classified voiced.
         clarity: Pitch-detector periodicity (NCC peak or residual clarity).
         rms: Frame RMS energy.
         centroid: Spectral centroid in Hz.
         low_band_ratio: Fraction of spectral energy below 500 Hz.
+        prediction_gain: LPC prediction gain (0.0 below the silence gate).
+        nasal_active: Whether the nasal override was closing the mouth.
+        openness_mapped: Openness target from the F1 mapping (or unvoiced
+            decay), before the nasal override and conditioning.
+        openness_target: Openness target after the nasal override, before
+            conditioning.
         c_lpc: Formant-plausibility confidence component.
         c_conv: Normalization-convergence confidence component.
         c_snr: SNR confidence component.
@@ -172,12 +193,18 @@ class LipsyncDebugFrame:
     f1: float
     f2: float
     f3: float
+    f2_bandwidth: float
+    f1_broad: float
     pitch_hz: float
     voiced: bool
     clarity: float
     rms: float
     centroid: float
     low_band_ratio: float
+    prediction_gain: float
+    nasal_active: bool
+    openness_mapped: float
+    openness_target: float
     c_lpc: float
     c_conv: float
     c_snr: float
@@ -475,6 +502,7 @@ class FormantLipsyncAnalyzer(BaseLipsyncAnalyzer):
         f1_found = f2_found = f3_found = False
         f1, f2, f3 = self._prev_f1, self._prev_f2, self._prev_f3
         prediction_gain = 0.0
+        f2_bandwidth = f1_broad = 0.0
         if rms >= silence_gate:
             self._window_frames(lpc_raw, prev_sample)
             lpc = dsp.lpc_coefficients(self._windowed)
@@ -504,6 +532,7 @@ class FormantLipsyncAnalyzer(BaseLipsyncAnalyzer):
             # it is openness evidence, kept out of adaptation, confidence and
             # the debug tap.
             f1_found, f2_found, f3_found = formants.f1 > 0, formants.f2 > 0, formants.f3 > 0
+            f2_bandwidth, f1_broad = formants.f2_bandwidth, formants.f1_broad
             f1_present = f1_found or formants.f1_broad > 0
             if f1_found:
                 f1 = formants.f1
@@ -513,10 +542,15 @@ class FormantLipsyncAnalyzer(BaseLipsyncAnalyzer):
                 f1 = self._prev_f1
             f2 = formants.f2 if f2_found else self._prev_f2
             f3 = formants.f3 if f3_found else self._prev_f3
+            dark = low_ratio > _NASAL_DARK_RATIO
+            f2_missing_damped = not f2_found and (
+                _NASAL_MISSING_F2_DAMPED == "always"
+                or (_NASAL_MISSING_F2_DAMPED == "dark" and dark)
+            )
             f2_damped = (
-                not f2_found
+                f2_missing_damped
                 or formants.f2_bandwidth > _NASAL_F2_MAX_BANDWIDTH_HZ
-                or (low_ratio > _NASAL_DARK_RATIO and formants.f2 > _NASAL_SPURIOUS_F2_HZ)
+                or (dark and formants.f2 > _NASAL_SPURIOUS_F2_HZ)
             )
         else:
             f1_present = False
@@ -558,6 +592,8 @@ class FormantLipsyncAnalyzer(BaseLipsyncAnalyzer):
             openness = rest + (self._prev_targets[0] - rest) * _UNVOICED_DECAY
             width = _NEUTRAL + (self._prev_targets[1] - _NEUTRAL) * _UNVOICED_DECAY
             rounding = _NEUTRAL + (self._prev_targets[2] - _NEUTRAL) * _UNVOICED_DECAY
+
+        openness_mapped = openness
 
         # Events (may override targets, e.g. nasal closes the mouth).
         speech = rms > 2.0 * max(
@@ -629,12 +665,18 @@ class FormantLipsyncAnalyzer(BaseLipsyncAnalyzer):
                     f1=f1 if f1_found else 0.0,
                     f2=f2 if f2_found else 0.0,
                     f3=f3 if f3_found else 0.0,
+                    f2_bandwidth=f2_bandwidth,
+                    f1_broad=f1_broad,
                     pitch_hz=pitch_hz,
                     voiced=voiced,
                     clarity=clarity,
                     rms=rms,
                     centroid=centroid,
                     low_band_ratio=low_ratio,
+                    prediction_gain=prediction_gain,
+                    nasal_active=self._nasal_active,
+                    openness_mapped=openness_mapped,
+                    openness_target=openness,
                     c_lpc=c_lpc,
                     c_conv=c_conv,
                     c_snr=c_snr,

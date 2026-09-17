@@ -6,4 +6,5 @@ __pycache__/
 .pytest_cache/
 .ruff_cache/
 server/benchmarks/fixtures/
-server/benchmarks/results/
+server/benchmarks/results/*
+!server/benchmarks/results/baseline*.json

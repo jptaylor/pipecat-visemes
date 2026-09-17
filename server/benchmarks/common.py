@@ -39,6 +39,7 @@ RESULTS_DIR = BENCH_DIR / "results"
 CORPUS_PATH = BENCH_DIR / "corpus.yaml"
 
 SYNTHESIS_TIMEOUT_SECS = 60
+TEARDOWN_TIMEOUT_SECS = 3
 
 # Every expectation key the corpus may use (validated at load so typos fail
 # loudly). Grouped for composite scoring: closure / nasal / silence. Vowel
@@ -160,6 +161,27 @@ def _make_tts(provider: str, voice_id: str):
     raise ValueError(f"unknown provider: {provider}")
 
 
+_teardowns: set[asyncio.Task] = set()
+
+
+def teardowns_pending() -> bool:
+    """Whether a detached TTS teardown is still running (see ``synthesize``)."""
+    return bool(_teardowns)
+
+
+def _detach_teardown(worker, run_task: asyncio.Task):
+    async def teardown():
+        try:
+            await worker.cancel()
+            await run_task
+        except BaseException:
+            pass
+
+    task = asyncio.create_task(teardown())
+    _teardowns.add(task)
+    task.add_done_callback(_teardowns.discard)
+
+
 async def synthesize(provider: str, voice_id: str, text: str) -> tuple[bytes, int]:
     """Synthesize one utterance through a real pipecat TTS service.
 
@@ -175,11 +197,18 @@ async def synthesize(provider: str, voice_id: str, text: str) -> tuple[bytes, in
     try:
         await worker.queue_frames([TTSSpeakFrame(text)])
         await asyncio.wait_for(collector.done.wait(), timeout=SYNTHESIS_TIMEOUT_SECS)
+        # The audio is complete at TTSStoppedFrame; teardown is best-effort and
+        # never awaited past a short grace (DeepgramTTSService on pipecat 1.10
+        # does not drain the EndFrame and its cancel takes ~30 s) — a slow
+        # teardown finishes detached while the next clip synthesizes.
         await worker.queue_frames([EndFrame()])
-        await asyncio.wait_for(run_task, timeout=10)
-    finally:
-        if not run_task.done():
-            run_task.cancel()
+        try:
+            await asyncio.wait_for(asyncio.shield(run_task), timeout=TEARDOWN_TIMEOUT_SECS)
+        except TimeoutError:
+            _detach_teardown(worker, run_task)
+    except BaseException:
+        run_task.cancel()
+        raise
     if not collector.chunks:
         raise RuntimeError(f"TTS produced no audio for: {text!r}")
     return b"".join(collector.chunks), collector.sample_rate

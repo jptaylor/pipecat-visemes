@@ -86,13 +86,18 @@ uv run python -m benchmarks.accuracy --offline --compare  # free re-score vs bas
 
 Scores the analyzer against Praat reference tracks (L1 formant Hz, L2 trajectory shape)
 and corpus expectations (L3 events) — see [plans/benchmark-harness-accuracy.md](plans/benchmark-harness-accuracy.md).
-Baseline: `server/benchmarks/results/baseline.json` (composite 70.9).
+Baselines are committed: `server/benchmarks/results/baseline.json` (Cartesia voice,
+composite 84.3) and `baseline-deepgram.json` (86.3; `--provider deepgram`); the
+pre-DSP-bundle run is kept as `baseline-order12-2026-09-17.json` (70.9). Fixtures are
+not committed. `--set dsp.LPC_ORDER=14` style overrides A/B a tunable without editing
+source.
 
 ## Further development
 
 A deep review of the whole project (verified findings, a benchmark revision and a
 ranked roadmap) is in [plans/deep-review-2026-09.md](plans/deep-review-2026-09.md);
-its §8 roadmap supersedes the tier list below.
+its §8 roadmap supersedes the tier list below. Its DSP findings were validated on
+real fixtures in [plans/deep-review-2026-09-results.md](plans/deep-review-2026-09-results.md).
 
 The formant analyzer is Tier 0 of a planned analyzer ladder; all tiers emit the
 same keyframe/event wire format, so clients are unaffected by tier choice.

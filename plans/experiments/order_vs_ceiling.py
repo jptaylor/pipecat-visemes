@@ -7,7 +7,7 @@ ceilings, on (a) each order's own committed hops and (b) the hops every order
 committed (matched frames, so coverage cannot move the error), with medians
 next to means (MAE is outlier-dominated).
 
-Run from server/:  uv run python ../plans/experiments/order_vs_ceiling.py
+Run from server/:  uv run python ../plans/experiments/order_vs_ceiling.py [cartesia|deepgram]
 Needs the cached fixtures (benchmarks/fixtures); no API keys.
 """
 
@@ -28,8 +28,10 @@ CEILINGS = (4500.0, 5000.0, 5500.0)
 
 
 async def main():
+    provider = sys.argv[1] if len(sys.argv) > 1 else "cartesia"
     sentences, voice_map = load_corpus()
-    voice = voice_map["cartesia"][0]
+    voice = voice_map[provider][0]
+    print(f"provider {provider} (corpus ceiling {voice.formant_ceiling:.0f} Hz)")
     clips = [
         await get_clip(s, voice, take, offline=True, refresh=False)
         for s in sentences
@@ -62,8 +64,6 @@ async def main():
             f"{'order':>5} | {'F1 own: n':>9} {'mean':>6} {'med':>5} | {'F1 matched: n':>13} {'mean':>6} {'med':>5}"
             f" | {'F2 own: n':>9} {'mean':>6} {'med':>5} | {'F2 matched: n':>13} {'mean':>6} {'med':>5}"
         )
-        for slot, name in ((1, "f1"), (2, "f2")):
-            pass
         rows = {order: [] for order in ORDERS}
         for slot in (1, 2):
             own_err = {order: [] for order in ORDERS}
