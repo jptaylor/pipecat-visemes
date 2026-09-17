@@ -187,7 +187,7 @@ def levinson_durbin(autocorr: np.ndarray, order: int) -> tuple[np.ndarray, float
     return a, err
 
 
-def lpc_coefficients(frame: np.ndarray, order: int = LPC_ORDER) -> LpcResult:
+def lpc_coefficients(frame: np.ndarray, order: int | None = None) -> LpcResult:
     """Compute the LPC solution for one pre-emphasized, windowed analysis frame.
 
     Autocorrelation method with lag-zero regularization, solved by
@@ -196,11 +196,14 @@ def lpc_coefficients(frame: np.ndarray, order: int = LPC_ORDER) -> LpcResult:
 
     Args:
         frame: float32 samples of length ``FRAME_SIZE`` at 16 kHz.
-        order: LPC model order.
+        order: LPC model order; ``LPC_ORDER`` when None (resolved per call, so
+            the constant is never bound at import).
 
     Returns:
         The LPC coefficients and the frame's prediction gain.
     """
+    if order is None:
+        order = LPC_ORDER
     n = frame.shape[0]
     r = np.empty(order + 1, dtype=np.float32)
     r[0] = np.dot(frame, frame) * _AUTOCORR_REGULARIZATION + EPSILON

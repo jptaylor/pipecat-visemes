@@ -11,6 +11,7 @@ Run: uv run python -m benchmarks.accuracy [--offline] [--compare]
 """
 
 import argparse
+import ast
 import asyncio
 import json
 import subprocess
@@ -32,6 +33,7 @@ from benchmarks.common import (
     get_clip,
     load_corpus,
 )
+from lipsync import dsp, formant_lipsync_analyzer
 from lipsync.base_lipsync_analyzer import LipsyncAnalysisContext
 from lipsync.formant_lipsync_analyzer import FormantLipsyncAnalyzer
 from lipsync.types import LipsyncEventKind
@@ -220,6 +222,32 @@ def compute_metrics(clip: Clip, keyframes, events, debug, ref: Reference) -> dic
     m["f1_r"] = _pearson(ours_f1[l1], ref.f1[l1])
     m["voicing_agreement"] = float(np.mean(ours_voiced == ref.voiced))
 
+    # Coverage (reported, not scored): MAE above only sees hops where we
+    # committed a slot, so a change that finds F1 on more frames can raise
+    # f1_mae while improving the mouth. ``*_coverage`` is the fraction of
+    # Praat-voiced hops L1 actually scores; ``*_slot_coverage`` ignores our own
+    # voicing decision, isolating the LPC/slot path from the pitch detector.
+    # Both are 0.0 (never NaN) when nothing commits, so a zero-coverage clip
+    # cannot vanish from an aggregate.
+    ref_f1_hops = ref.voiced & np.isfinite(ref.f1)
+    ref_f2_hops = ref.voiced & np.isfinite(ref.f2)
+
+    def coverage(scored: np.ndarray, population: np.ndarray, w: np.ndarray) -> float:
+        n = int((population & w).sum())
+        return float((scored & w).sum() / n) if n else 0.0
+
+    add_windowed("f1_coverage", lambda w: coverage(l1, ref_f1_hops, w))
+    add_windowed("f2_coverage", lambda w: coverage(l1_f2, ref_f2_hops, w))
+    add_windowed(
+        "f1_slot_coverage", lambda w: coverage(ref_f1_hops & (ours_f1 > 0), ref_f1_hops, w)
+    )
+    add_windowed(
+        "f2_slot_coverage", lambda w: coverage(ref_f2_hops & (ours_f2 > 0), ref_f2_hops, w)
+    )
+    m["f1_scored_n"] = float(l1.sum())
+    m["f2_scored_n"] = float(l1_f2.sum())
+    m["ref_voiced_n"] = float(ref.voiced.sum())
+
     # L2 — normalized trajectory shape (scale-invariant).
     if len(keyframes) >= 2:
         kf_offs = np.array([k.offset for k in keyframes])
@@ -395,6 +423,10 @@ def report(results: list[ClipResult], run_meta: dict, baseline: dict | None):
     metric_names = [
         "f1_mae_hz",
         "f2_mae_hz",
+        "f1_coverage",
+        "f2_coverage",
+        "f1_slot_coverage",
+        "f2_slot_coverage",
         "f1_r",
         "voicing_agreement",
         "openness_r",
@@ -427,19 +459,57 @@ def report(results: list[ClipResult], run_meta: dict, baseline: dict | None):
     for bucket, (ok, n) in sorted(check_totals.items()):
         rows.append((f"checks: {bucket}", f"{ok}/{n}", "", ""))
 
+    # Per-clip L1: MAE next to the number of hops it was computed over
+    # (committed / Praat-voiced), so a coverage change is never read as an
+    # accuracy change. Baseline values in parentheses when comparing.
+    base_clips = {c["label"]: c["metrics"] for c in baseline["clips"]} if baseline else {}
+
+    def l1_cell(r: ClipResult, slot: str) -> str:
+        n, ref_n = int(r.metrics[f"{slot}_scored_n"]), int(r.metrics["ref_voiced_n"])
+        cell = f"{_fmt(r.metrics[f'{slot}_mae_hz'], 0)} Hz · {n}/{ref_n}"
+        base = base_clips.get(r.clip_label)
+        if base and base.get(f"{slot}_scored_n") is not None:
+            cell += f"  ({_fmt(base.get(f'{slot}_mae_hz'), 0)} · {int(base[f'{slot}_scored_n'])})"
+        return cell
+
+    clip_cols = (
+        "clip",
+        "f1_mae · committed/voiced",
+        "f1_cov",
+        "f2_mae · committed/voiced",
+        "f2_cov",
+    )
+    clip_rows = [
+        (
+            r.clip_label,
+            l1_cell(r, "f1"),
+            _fmt(r.metrics["f1_coverage"]),
+            l1_cell(r, "f2"),
+            _fmt(r.metrics["f2_coverage"]),
+        )
+        for r in results
+    ]
+
     try:
         from rich.console import Console
         from rich.table import Table
 
-        table = Table(show_header=True, header_style="bold")
-        for col in ("metric", "mean ± std", "post-conv", "Δ baseline"):
-            table.add_column(col)
-        for row in rows:
-            table.add_row(*row)
-        Console().print(table)
+        console = Console()
+        for cols, table_rows in (
+            (("metric", "mean ± std", "post-conv", "Δ baseline"), rows),
+            (clip_cols, clip_rows),
+        ):
+            table = Table(show_header=True, header_style="bold")
+            for col in cols:
+                table.add_column(col)
+            for row in table_rows:
+                table.add_row(*row)
+            console.print(table)
     except ImportError:
         for row in rows:
             print(f"  {row[0]:<24} {row[1]:>16} {row[2]:>10} {row[3]:>10}")
+        for row in clip_rows:
+            print(f"  {row[0]:<30} {row[1]:>30} {row[2]:>6} {row[3]:>30} {row[4]:>6}")
 
     scored = sorted(results, key=lambda r: composite_score([r])[0])
     worst = ", ".join(f"{r.clip_label} ({composite_score([r])[0]:.1f})" for r in scored[:3])
@@ -452,6 +522,34 @@ def report(results: list[ClipResult], run_meta: dict, baseline: dict | None):
 #
 # Run orchestration
 #
+
+# Modules whose constants ``--set`` may override for A/B runs.
+_OVERRIDE_MODULES = {"dsp": dsp, "analyzer": formant_lipsync_analyzer}
+
+
+def apply_overrides(specs: list[str]) -> dict[str, object]:
+    """Apply ``module.CONSTANT=value`` overrides before any analyzer is built.
+
+    Equivalent to editing the constant in the source: the lipsync modules read
+    their tunables at call time (nothing binds them at import). Unknown names
+    fail loudly so a typo cannot silently A/B nothing.
+    """
+    applied: dict[str, object] = {}
+    for spec in specs:
+        target, _, raw = spec.partition("=")
+        module_name, _, name = target.partition(".")
+        module = _OVERRIDE_MODULES.get(module_name)
+        if module is None or not raw or not hasattr(module, name):
+            raise SystemExit(
+                f"bad --set {spec!r}: expected {{dsp,analyzer}}.EXISTING_CONSTANT=value"
+            )
+        try:
+            value = ast.literal_eval(raw)
+        except (ValueError, SyntaxError):
+            value = raw
+        setattr(module, name, value)
+        applied[target] = value
+    return applied
 
 
 def _src_sha() -> str:
@@ -533,6 +631,7 @@ async def run(args) -> dict:
             "takes": args.takes,
             "warm": args.warm,
             "sentences": [s.id for s in sentences],
+            "overrides": getattr(args, "overrides", {}),
         },
         "composite": composite,
         "component_scores": comp_scores,
@@ -598,6 +697,15 @@ def main():
     parser.add_argument("--save-baseline", action="store_true")
     parser.add_argument("--compare", nargs="?", const=str(BASELINE_PATH), default=None)
     parser.add_argument(
+        "--set",
+        action="append",
+        default=[],
+        metavar="MODULE.CONST=VALUE",
+        help="override a lipsync tunable for this run, e.g. dsp.LPC_ORDER=16 "
+        "(modules: dsp, analyzer); recorded in the results JSON",
+    )
+    parser.add_argument("--tag", help="results file name suffix (accuracy-<tag>.json)")
+    parser.add_argument(
         "--calibrate-expectations",
         action="store_true",
         help="print Praat-oracle p90 stats per clip (for setting corpus bars) and exit",
@@ -606,6 +714,10 @@ def main():
 
     logger.remove()
     logger.add(sys.stderr, level="WARNING")
+
+    args.overrides = apply_overrides(args.set)
+    if args.overrides:
+        print("overrides: " + ", ".join(f"{k}={v}" for k, v in args.overrides.items()))
 
     if args.calibrate_expectations:
         asyncio.run(calibrate(args))
@@ -624,7 +736,7 @@ def main():
     report(results, payload["run"], baseline)
 
     RESULTS_DIR.mkdir(parents=True, exist_ok=True)
-    stamp = datetime.now().strftime("%Y%m%d-%H%M%S")
+    stamp = args.tag or datetime.now().strftime("%Y%m%d-%H%M%S")
     out_path = RESULTS_DIR / f"accuracy-{stamp}.json"
     out_path.write_text(json.dumps(payload, indent=2))
     print(f"\nresults: {out_path.relative_to(Path.cwd())}")
