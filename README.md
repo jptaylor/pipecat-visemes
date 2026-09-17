@@ -90,6 +90,10 @@ Baseline: `server/benchmarks/results/baseline.json` (composite 70.9).
 
 ## Further development
 
+A deep review of the whole project (verified findings, a benchmark revision and a
+ranked roadmap) is in [plans/deep-review-2026-09.md](plans/deep-review-2026-09.md);
+its §8 roadmap supersedes the tier list below.
+
 The formant analyzer is Tier 0 of a planned analyzer ladder; all tiers emit the
 same keyframe/event wire format, so clients are unaffected by tier choice.
 
