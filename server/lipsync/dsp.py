@@ -10,7 +10,7 @@ Vendored implementations (no scipy/librosa dependency) of the signal
 processing routines needed by
 :class:`~pipecat.audio.lipsync.formant_lipsync_analyzer.FormantLipsyncAnalyzer`:
 LPC via autocorrelation + Levinson-Durbin, formant extraction from LPC roots,
-pitch from the LPC residual, spectral features for nasal detection, and a
+pitch by normalized cross-correlation (or the LPC residual), spectral features for nasal detection, and a
 streaming quantile estimator for adaptive normalization.
 
 Analysis always runs at 16 kHz mono (audio is resampled on ingest), which
@@ -19,6 +19,7 @@ Per-frame temporaries are kept small; ``np.roots`` and the FFTs allocate
 internally and are the accepted exceptions to allocation-free operation.
 """
 
+from functools import lru_cache
 from typing import NamedTuple
 
 import numpy as np
@@ -26,15 +27,31 @@ import numpy as np
 # Fixed internal analysis rate in Hz; TTS audio is resampled to this on ingest.
 ANALYSIS_SAMPLE_RATE = 16000
 
-# 25 ms analysis window, 20 ms hop (in samples at 16 kHz).
+# 25 ms analysis window, 20 ms hop (in samples at 16 kHz). This frame drives
+# energy, closure/silence detection and the nasal spectral features, so event
+# timing keeps its 25 ms resolution.
 FRAME_SIZE = 400
 HOP_SIZE = 320
+
+# LPC/formant (and residual-pitch) window, centered on the same hop as the
+# 25 ms frame. Decoupled so a longer LPC window cannot smear event timing;
+# equal to FRAME_SIZE means one shared frame. Must be >= FRAME_SIZE with an
+# even difference.
+LPC_FRAME_SIZE = 400
+
+# Raw frame read by the NCC pitch detector, centered on the same hop (same
+# size constraints). 40 ms gives the NCC a 374-sample reference segment
+# instead of 134: voicing agreement with Praat 0.926 -> 0.955 on the corpus.
+PITCH_FRAME_SIZE = 640
 
 # First-order pre-emphasis coefficient applied before LPC.
 PRE_EMPHASIS = 0.97
 
-# LPC model order at 16 kHz.
-LPC_ORDER = 12
+# LPC model order at 16 kHz: two poles per kHz of bandwidth. Order 12 is
+# pole-starved on real speech (resonances above F3 take poles, F1/F2 merge
+# into broad roots and the slots empty out); see
+# plans/deep-review-2026-09-results.md for the 12/14/16/18 A/B.
+LPC_ORDER = 16
 
 # LPC roots count as formants within these frequency/bandwidth bounds.
 FORMANT_MIN_HZ = 200
@@ -49,6 +66,12 @@ F1_BAND_HZ = (200.0, 1000.0)
 F2_BAND_HZ = (650.0, 2600.0)  # lower edge below male /u,o/ F2 (~700 Hz)
 F3_BAND_HZ = (1800.0, 3500.0)
 _SLOT_NOMINAL_HZ = (550.0, 1500.0, 2500.0)
+# Per-slot (F1, F2, F3) weight of the absolute prior in slot assignment: each
+# filled slot also pays ``weight * |f - nominal| / nominal``, so track
+# continuity alone can never lock a slot onto the wrong root (F2 riding the
+# F3 track) while the right one is among the candidates. 0.0 disables that
+# slot's prior (pure previous-frame continuity).
+SLOT_PRIOR_WEIGHTS = (0.0, 1.0, 1.0)
 _F2_MIN_ABOVE_F1_HZ = 150.0
 _F3_MIN_ABOVE_F2_HZ = 200.0
 # F1 physically broadens with mouth opening: open /ɑ/ roots measure 600-730 Hz
@@ -63,31 +86,40 @@ PITCH_MIN_HZ = 60
 PITCH_MAX_HZ = 400
 VOICED_CLARITY_THRESHOLD = 0.35
 
+# Pitch/voicing estimator: "ncc" (normalized cross-correlation on the raw
+# frame, :func:`ncc_pitch`) or "residual" (LPC-residual autocorrelation,
+# :func:`lpc_residual_pitch` — coupled to the LPC order and window: it
+# whitens with the same fit, so it degrades as either grows).
+PITCH_METHOD = "ncc"
+# NCC peak above which a frame is voiced. NCC alone over-voices low-level
+# periodic tails; the analyzer adds an energy gate relative to the recent peak.
+NCC_VOICED_THRESHOLD = 0.6
+# The smallest lag whose NCC reaches this fraction of the global peak wins
+# (octave guard: the NCC also peaks at period multiples).
+_NCC_OCTAVE_GUARD = 0.85
+
 # Guard added to divisors and log arguments.
 EPSILON = 1e-9
 
 _PITCH_LAG_MIN = ANALYSIS_SAMPLE_RATE // PITCH_MAX_HZ
 _PITCH_LAG_MAX = ANALYSIS_SAMPLE_RATE // PITCH_MIN_HZ
 
-# Pitch autocorrelation via FFT: needs nfft >= 2 * FRAME_SIZE - 1 for linear lags.
-_PITCH_NFFT = 1024
-
 # Lag-zero regularization: guards Levinson against singular systems on silence
 # with negligible pole damping (1e-4 measurably shrinks high-gain pole radii).
 _AUTOCORR_REGULARIZATION = 1.0 + 1e-6
 
 
-def _pitch_lag_gain() -> np.ndarray:
+@lru_cache(maxsize=4)
+def _pitch_lag_gain(frame_size: int) -> np.ndarray:
     # The Hamming window attenuates autocorrelation peaks proportionally to
     # lag; compensate clarity by the window's own autocorrelation, clamped so
-    # large lags don't over-amplify noise correlations.
-    window = np.hamming(FRAME_SIZE)
-    autocorr = np.correlate(window, window, "full")[FRAME_SIZE - 1 :][: _PITCH_LAG_MAX + 1]
+    # large lags don't over-amplify noise correlations. Keyed by frame length
+    # so the table always follows the window the pitch frame was cut with.
+    window = np.hamming(frame_size)
+    autocorr = np.correlate(window, window, "full")[frame_size - 1 :][: _PITCH_LAG_MAX + 1]
     autocorr /= autocorr[0]
     return (1.0 / np.maximum(autocorr, 0.1)).astype(np.float32)
 
-
-_PITCH_LAG_GAIN = _pitch_lag_gain()
 
 _SPECTRAL_NFFT = 512
 _RFFT_FREQS = np.fft.rfftfreq(_SPECTRAL_NFFT, d=1.0 / ANALYSIS_SAMPLE_RATE).astype(np.float32)
@@ -195,7 +227,7 @@ def lpc_coefficients(frame: np.ndarray, order: int | None = None) -> LpcResult:
     :func:`lpc_residual_pitch` (residual) so the recursion runs once per frame.
 
     Args:
-        frame: float32 samples of length ``FRAME_SIZE`` at 16 kHz.
+        frame: float32 samples at 16 kHz (``LPC_FRAME_SIZE`` in the analyzer).
         order: LPC model order; ``LPC_ORDER`` when None (resolved per call, so
             the constant is never bound at import).
 
@@ -219,9 +251,10 @@ def _assign_slots(
 ) -> tuple[tuple[float, float, float], float]:
     """Assign candidate (freq, bandwidth) roots to F1/F2/F3 slots.
 
-    Exhaustive over per-band eligible candidates (a handful at LPC order 12):
+    Exhaustive over per-band eligible candidates (a handful per frame):
     maximize filled slots first, then minimize total relative deviation from
-    the targets. Filled-count-first resolves the /u/ ambiguity (300+800 both
+    the targets plus the ``SLOT_PRIOR_WEIGHTS`` pull toward the nominal slot
+    centers. Filled-count-first resolves the /u/ ambiguity (300+800 both
     fit the F1 band, but only F1=300 leaves an F2) without preferring
     spurious low poles when the true F1 is present.
 
@@ -254,7 +287,13 @@ def _assign_slots(
                 if f2 and f3 and f3 <= f2 + _F3_MIN_ABOVE_F2_HZ:
                     continue
                 filled = (f1 > 0) + (f2 > 0) + (f3 > 0)
-                deviation = sum(abs(f - t) / t for f, t in zip((f1, f2, f3), targets) if f > 0)
+                deviation = sum(
+                    abs(f - t) / t + weight * abs(f - nominal) / nominal
+                    for f, t, nominal, weight in zip(
+                        (f1, f2, f3), targets, _SLOT_NOMINAL_HZ, SLOT_PRIOR_WEIGHTS
+                    )
+                    if f > 0
+                )
                 if (filled, -deviation) > (best[0], -best[1]):
                     f2_bw = candidates[i2][1] if i2 is not None else 0.0
                     best = (filled, deviation, (f1, f2, f3), f2_bw)
@@ -334,10 +373,10 @@ def lpc_residual_pitch(frame: np.ndarray, lpc: np.ndarray) -> PitchEstimate:
     periodicity. Searches ``PITCH_MIN_HZ``..``PITCH_MAX_HZ``; a frame is
     voiced when the peak clarity exceeds ``VOICED_CLARITY_THRESHOLD``. Clarity
     is compensated for the Hamming window's lag decay, so the frame is
-    expected to be windowed with ``np.hamming(FRAME_SIZE)``.
+    expected to be Hamming-windowed over its full length.
 
     Args:
-        frame: float32 samples of length ``FRAME_SIZE`` at 16 kHz.
+        frame: float32 samples at 16 kHz (the LPC frame).
         lpc: LPC coefficients used to compute the residual.
 
     Returns:
@@ -345,12 +384,16 @@ def lpc_residual_pitch(frame: np.ndarray, lpc: np.ndarray) -> PitchEstimate:
     """
     n = frame.shape[0]
     residual = np.convolve(frame, lpc)[:n]
-    spectrum = np.fft.rfft(residual, _PITCH_NFFT)
+    # Autocorrelation via FFT: nfft >= 2n - 1 keeps the lags linear.
+    nfft = 1 << (2 * n - 1).bit_length()
+    spectrum = np.fft.rfft(residual, nfft)
     autocorr = np.fft.irfft(spectrum.real**2 + spectrum.imag**2)
 
     r0 = float(autocorr[0]) + EPSILON
     lag_max = min(_PITCH_LAG_MAX, n - 1)
-    segment = autocorr[_PITCH_LAG_MIN : lag_max + 1] * _PITCH_LAG_GAIN[_PITCH_LAG_MIN : lag_max + 1]
+    segment = (
+        autocorr[_PITCH_LAG_MIN : lag_max + 1] * _pitch_lag_gain(n)[_PITCH_LAG_MIN : lag_max + 1]
+    )
     peak = float(segment.max())
     # Octave guard: prefer the smallest lag whose peak is close to the global
     # maximum — the autocorrelation also peaks at period multiples, and a bare
@@ -362,6 +405,56 @@ def lpc_residual_pitch(frame: np.ndarray, lpc: np.ndarray) -> PitchEstimate:
         return PitchEstimate(0.0, False, max(clarity, 0.0))
     frequency = ANALYSIS_SAMPLE_RATE / float(_PITCH_LAG_MIN + best)
     return PitchEstimate(frequency, True, clarity)
+
+
+def ncc_pitch(frame: np.ndarray) -> PitchEstimate:
+    """Estimate pitch by normalized cross-correlation of the raw frame.
+
+    Correlates the frame's leading segment against the frame at every
+    candidate lag, normalized by both segments' energies, so the peak is a
+    periodicity measure in 0..1 that is independent of level, spectral
+    envelope and the LPC fit. The frame must be raw: not windowed (a taper
+    breaks the energy normalization) and not pre-emphasized (pre-emphasis
+    boosts aspiration noise over the periodic low harmonics).
+
+    Args:
+        frame: float32 raw samples at 16 kHz; longer than ``_PITCH_LAG_MAX``.
+
+    Returns:
+        The pitch estimate for the frame; ``clarity`` is the NCC peak.
+    """
+    x = frame - np.mean(frame)
+    n = x.shape[0]
+    lag_max = min(_PITCH_LAG_MAX, n - 2 * _PITCH_LAG_MIN)
+    seg = n - lag_max
+    reference = x[:seg]
+    cross = np.correlate(x[_PITCH_LAG_MIN:], reference, "valid")  # lags lag_min..lag_max
+    energy = np.concatenate(([0.0], np.cumsum(x * x, dtype=np.float64)))
+    lag_energy = (
+        energy[_PITCH_LAG_MIN + seg : lag_max + seg + 1] - energy[_PITCH_LAG_MIN : lag_max + 1]
+    )
+    ncc = cross / np.sqrt(energy[seg] * lag_energy + EPSILON)
+
+    peak = float(ncc.max())
+    if peak <= NCC_VOICED_THRESHOLD:
+        return PitchEstimate(0.0, False, max(peak, 0.0))
+    # Octave guard: the local maximum inside the first contiguous run that
+    # reaches the guard fraction of the peak (not the run's first sample).
+    above = ncc >= _NCC_OCTAVE_GUARD * peak
+    first = int(np.argmax(above))
+    below = np.nonzero(~above[first:])[0]
+    end = first + int(below[0]) if below.size else above.shape[0]
+    best = first + int(np.argmax(ncc[first:end]))
+    clarity = float(ncc[best])
+    # Parabolic interpolation around the chosen lag.
+    shift = 0.0
+    if 0 < best < ncc.shape[0] - 1:
+        left, mid, right = float(ncc[best - 1]), clarity, float(ncc[best + 1])
+        curvature = left - 2.0 * mid + right
+        if curvature < 0.0:
+            shift = 0.5 * (left - right) / curvature
+    frequency = ANALYSIS_SAMPLE_RATE / (_PITCH_LAG_MIN + best + shift)
+    return PitchEstimate(float(frequency), clarity > NCC_VOICED_THRESHOLD, clarity)
 
 
 def rms_energy(frame: np.ndarray) -> float:

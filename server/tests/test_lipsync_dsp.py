@@ -12,12 +12,14 @@ from lipsync.base_lipsync_analyzer import LipsyncAnalysisContext
 from lipsync.dsp import (
     ANALYSIS_SAMPLE_RATE,
     FRAME_SIZE,
+    PITCH_FRAME_SIZE,
     PRE_EMPHASIS,
     P2QuantileEstimator,
     levinson_durbin,
     lpc_coefficients,
     lpc_formants,
     lpc_residual_pitch,
+    ncc_pitch,
     rms_energy,
     spectral_nasal_features,
 )
@@ -102,6 +104,24 @@ class TestFormants(unittest.TestCase):
                 self.assertAlmostEqual(got_f1, f1, delta=40, msg=f"F1 for /{name}/")
                 self.assertAlmostEqual(got_f2, f2, delta=40, msg=f"F2 for /{name}/")
 
+    def test_formants_covered_with_realistic_high_resonators(self):
+        # Real 16 kHz speech has resonances above F3. With too few poles the
+        # fit spends them up there, F1/F2 merge into broad roots and the slots
+        # empty out (order 12: F1 found on ~1/3 of these frames, ~160 Hz off).
+        extra = [(3500, 200), (4500, 250), (5500, 300), (6500, 300)]
+        for name, f1, f2 in (("aa", 700, 1200), ("ii", 300, 2300), ("uu", 300, 800)):
+            with self.subTest(vowel=name):
+                x = synth_vowel(f1, f2, f0=180, extra=extra)
+                prev = None
+                estimates = []
+                for start in _FRAME_STARTS:
+                    prev = lpc_formants(analysis_frame(x, start), prev=prev)
+                    estimates.append(prev)
+                covered = [e for e in estimates if e.plausible]
+                self.assertGreaterEqual(len(covered), 0.9 * len(estimates))
+                self.assertAlmostEqual(float(np.median([e.f1 for e in covered])), f1, delta=40)
+                self.assertAlmostEqual(float(np.median([e.f2 for e in covered])), f2, delta=40)
+
     def test_damped_f2_not_mis_slotted(self):
         # F2 resonator too broad to yield a valid root: the F2 slot must stay
         # empty rather than promoting F3 (2900 Hz) into it.
@@ -150,25 +170,56 @@ class TestFormants(unittest.TestCase):
 
 
 class TestPitch(unittest.TestCase):
-    def _pitch_at(self, x, start):
+    def _ncc_at(self, x, start):
+        return ncc_pitch(x[start : start + PITCH_FRAME_SIZE])  # raw frame
+
+    def _residual_at(self, x, start):
+        # The residual detector whitens with the LPC fit, so it is coupled to
+        # the order: at order 16 it reads ~64 Hz for a 120 Hz train. It is the
+        # fallback path, calibrated (and tested) at order 12.
         frame = analysis_frame(x, start)
-        return lpc_residual_pitch(frame, lpc_coefficients(frame).coefficients)
+        return lpc_residual_pitch(frame, lpc_coefficients(frame, order=12).coefficients)
 
     def test_pitch_on_synthetic_glottal_train(self):
-        for f0, delta in ((120, 5), (280, 8)):
-            with self.subTest(f0=f0):
-                x = synth_vowel(700, 1200, f0=f0)
-                estimates = [self._pitch_at(x, s) for s in _FRAME_STARTS]
-                voiced = [e for e in estimates if e.voiced]
-                self.assertGreaterEqual(len(voiced), 0.8 * len(estimates))
-                median = float(np.median([e.frequency for e in voiced]))
-                self.assertAlmostEqual(median, f0, delta=delta)
+        for method in (self._ncc_at, self._residual_at):
+            for f0, delta in ((120, 5), (280, 8)):
+                with self.subTest(method=method.__name__, f0=f0):
+                    x = synth_vowel(700, 1200, f0=f0)
+                    estimates = [method(x, s) for s in _FRAME_STARTS]
+                    voiced = [e for e in estimates if e.voiced]
+                    self.assertGreaterEqual(len(voiced), 0.8 * len(estimates))
+                    median = float(np.median([e.frequency for e in voiced]))
+                    self.assertAlmostEqual(median, f0, delta=delta)
+
+    def test_ncc_pitch_across_vowels_and_f0(self):
+        # No octave errors across the pitch range, including a vowel whose F1
+        # sits on a low harmonic (the classic halving/doubling trap).
+        for f1, f2 in ((700, 1200), (300, 2300), (300, 800)):
+            for f0 in (80, 100, 160, 220, 320):
+                with self.subTest(f1=f1, f0=f0):
+                    x = synth_vowel(f1, f2, f0=f0)
+                    estimates = [self._ncc_at(x, s) for s in _FRAME_STARTS]
+                    voiced = [e for e in estimates if e.voiced]
+                    self.assertGreaterEqual(len(voiced), 0.9 * len(estimates))
+                    # synth_vowel's period is int(fs / f0) samples.
+                    true_f0 = ANALYSIS_SAMPLE_RATE / int(ANALYSIS_SAMPLE_RATE / f0)
+                    for e in voiced:
+                        self.assertAlmostEqual(e.frequency, true_f0, delta=0.03 * true_f0)
+
+    def test_ncc_pitch_robust_to_noise(self):
+        rng = np.random.default_rng(5)
+        x = synth_vowel(700, 1200, f0=140)
+        x = x + rng.standard_normal(x.size).astype(np.float32) * float(np.std(x)) * 10 ** (-10 / 20)
+        estimates = [self._ncc_at(x, s) for s in _FRAME_STARTS]  # 10 dB SNR
+        self.assertGreaterEqual(sum(e.voiced for e in estimates), 0.8 * len(estimates))
 
     def test_unvoiced_noise_not_voiced(self):
         rng = np.random.default_rng(11)
         x = rng.standard_normal(ANALYSIS_SAMPLE_RATE // 2).astype(np.float32)
-        estimates = [self._pitch_at(x, s) for s in _FRAME_STARTS]
-        self.assertLess(sum(e.voiced for e in estimates), len(estimates) // 2)
+        for method in (self._ncc_at, self._residual_at):
+            with self.subTest(method=method.__name__):
+                estimates = [method(x, s) for s in _FRAME_STARTS]
+                self.assertLess(sum(e.voiced for e in estimates), len(estimates) // 2)
 
 
 class TestEnergyAndSpectral(unittest.TestCase):

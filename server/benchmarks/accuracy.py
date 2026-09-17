@@ -579,6 +579,8 @@ async def run(args) -> dict:
         voices = [Voice(args.provider, vid, 5500) for vid in args.voices.split(",")]
     if not voices:
         raise SystemExit(f"no voices configured for provider {args.provider}")
+    if args.ceiling:
+        voices = [Voice(v.provider, v.id, args.ceiling) for v in voices]
 
     results: list[ClipResult] = []
     for voice in voices:
@@ -632,6 +634,7 @@ async def run(args) -> dict:
             "warm": args.warm,
             "sentences": [s.id for s in sentences],
             "overrides": getattr(args, "overrides", {}),
+            "ceiling_override": args.ceiling,
         },
         "composite": composite,
         "component_scores": comp_scores,
@@ -703,6 +706,11 @@ def main():
         metavar="MODULE.CONST=VALUE",
         help="override a lipsync tunable for this run, e.g. dsp.LPC_ORDER=16 "
         "(modules: dsp, analyzer); recorded in the results JSON",
+    )
+    parser.add_argument(
+        "--ceiling",
+        type=float,
+        help="override the Praat formant ceiling for every voice (reference sensitivity check)",
     )
     parser.add_argument("--tag", help="results file name suffix (accuracy-<tag>.json)")
     parser.add_argument(

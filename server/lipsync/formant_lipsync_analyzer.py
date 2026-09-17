@@ -104,6 +104,11 @@ _NASAL_SOFT_CAP_OPENNESS = 0.2
 _NASAL_SOFT_CAP_CENTROID_HZ = 800.0
 _NASAL_SOFT_CAP_RATIO = 0.5
 
+# NCC voicing gate: a voiced hop must also reach this fraction of the recent
+# RMS peak. NCC is level-independent, so without the gate low-level periodic
+# tails and room tone read as voiced.
+_VOICED_MIN_PEAK_FRACTION = 0.05
+
 # Conditioning.
 _MEDIAN_TAPS = 3
 _SLEW_MAX_PER_HOP = 0.25
@@ -148,6 +153,7 @@ class LipsyncDebugFrame:
         f3: Raw third formant in Hz.
         pitch_hz: Raw pitch in Hz (0.0 when unvoiced).
         voiced: Whether the hop was classified voiced.
+        clarity: Pitch-detector periodicity (NCC peak or residual clarity).
         rms: Frame RMS energy.
         centroid: Spectral centroid in Hz.
         low_band_ratio: Fraction of spectral energy below 500 Hz.
@@ -168,6 +174,7 @@ class LipsyncDebugFrame:
     f3: float
     pitch_hz: float
     voiced: bool
+    clarity: float
     rms: float
     centroid: float
     low_band_ratio: float
@@ -195,14 +202,15 @@ class _PendingClosure:
 class FormantLipsyncAnalyzer(BaseLipsyncAnalyzer):
     """Estimates mouth articulation from TTS audio via LPC formant analysis.
 
-    Audio is analyzed at 16 kHz in 25 ms windows at a 20 ms hop. Per frame,
-    the analyzer maps:
+    Audio is analyzed at 16 kHz at a 20 ms hop: a 25 ms window for energy and
+    events, and an LPC window (``dsp.LPC_FRAME_SIZE``) centered on the same
+    hop for formants. Per frame, the analyzer maps:
 
     - F1 → openness (normalized within an adaptive F1 range)
     - F2 → width (high F2 → spread /i/, low F2 → back /u, o/)
     - F2 + F1 heuristic → rounding
     - RMS envelope → energy
-    - LPC-residual autocorrelation → pitch and voicing
+    - Normalized cross-correlation of the raw frame → pitch and voicing
 
     Formant ranges start from generic priors and adapt online via streaming
     P5/P95 quantiles of voiced frames — no calibration step. Confidence
@@ -239,11 +247,34 @@ class FormantLipsyncAnalyzer(BaseLipsyncAnalyzer):
         self._collect_debug = collect_debug
         self.debug_features: list[LipsyncDebugFrame] = []
 
+        # Three framings share each hop center: the 25 ms frame (energy,
+        # events, nasal spectral features), the LPC frame (formants, residual
+        # pitch) and the NCC pitch frame. ``_pad`` is the widest frame's
+        # reach either side of the 25 ms frame.
+        self._lpc_frame_size = dsp.LPC_FRAME_SIZE
+        self._pitch_frame_size = (
+            dsp.PITCH_FRAME_SIZE if dsp.PITCH_METHOD == "ncc" else dsp.FRAME_SIZE
+        )
+        for size in (self._lpc_frame_size, self._pitch_frame_size):
+            if size < dsp.FRAME_SIZE or (size - dsp.FRAME_SIZE) % 2:
+                raise ValueError("frame sizes must be >= FRAME_SIZE with an even difference")
+        self._lpc_pad = (self._lpc_frame_size - dsp.FRAME_SIZE) // 2
+        self._pitch_pad = (self._pitch_frame_size - dsp.FRAME_SIZE) // 2
+        self._pad = max(self._lpc_pad, self._pitch_pad)
+
         # Preallocated scratch; analysis frames are fixed-size at 16 kHz. The
-        # ingest buffer covers the processor's largest drain (2 s ring cap).
-        self._window = np.hamming(dsp.FRAME_SIZE).astype(np.float32)
-        self._windowed = np.empty(dsp.FRAME_SIZE, dtype=np.float32)
-        self._buf = np.empty(2 * dsp.ANALYSIS_SAMPLE_RATE + dsp.FRAME_SIZE, dtype=np.float32)
+        # ingest buffer covers the processor's largest drain (2 s ring cap)
+        # plus the widest frame and the flush padding.
+        self._window = np.hamming(self._lpc_frame_size).astype(np.float32)
+        self._windowed = np.empty(self._lpc_frame_size, dtype=np.float32)
+        if self._lpc_pad:
+            self._window_short = np.hamming(dsp.FRAME_SIZE).astype(np.float32)
+            self._windowed_short = np.empty(dsp.FRAME_SIZE, dtype=np.float32)
+        else:
+            self._windowed_short = self._windowed  # one shared frame
+        self._buf = np.empty(
+            2 * dsp.ANALYSIS_SAMPLE_RATE + dsp.FRAME_SIZE + 3 * self._pad, dtype=np.float32
+        )
 
         self._reset_session_state()
         self._reset_utterance_state()
@@ -298,6 +329,11 @@ class FormantLipsyncAnalyzer(BaseLipsyncAnalyzer):
             ``processed_up_to`` advanced past everything ingested.
         """
         result = LipsyncFrameResult()
+        # The wider frames look ``_pad`` samples past the 25 ms frame: pad with
+        # zeros so every complete 25 ms frame is still analyzed.
+        if self._pad:
+            self._buf[self._buf_len : self._buf_len + self._pad] = 0.0
+            self._buf_len += self._pad
         self._drain(result)
         # Everything ingested is final: tail discarded, pending closures dead.
         result.processed_up_to = self._hops * HOP_SECONDS + EVENT_FINALIZE_HORIZON_SEC
@@ -335,7 +371,10 @@ class FormantLipsyncAnalyzer(BaseLipsyncAnalyzer):
         self._energy_max = _NOISE_FLOOR_MIN
 
     def _reset_utterance_state(self):
-        self._buf_len = 0
+        # The buffer leads with the widest frame's left context (zeros at the
+        # utterance start), so buffer index 0 is that frame's first start.
+        self._buf[: self._pad] = 0.0
+        self._buf_len = self._pad
         self._prev_sample = 0.0
         self._hops = 0
         self._prev_f1 = 0.0
@@ -368,9 +407,21 @@ class FormantLipsyncAnalyzer(BaseLipsyncAnalyzer):
     def _drain(self, result: LipsyncFrameResult):
         """Process all complete analysis windows currently buffered."""
         start = 0
-        while self._buf_len - start >= dsp.FRAME_SIZE:
-            prev = self._prev_sample if start == 0 else float(self._buf[start - 1])
-            self._process_hop(self._buf[start : start + dsp.FRAME_SIZE], prev, result)
+        pad = self._pad
+        lpc_lead = pad - self._lpc_pad
+        pitch_lead = pad - self._pitch_pad
+        while self._buf_len - start >= dsp.FRAME_SIZE + 2 * pad:
+            lpc_start = start + lpc_lead
+            # Pre-emphasis needs the sample before the LPC frame: zero at the
+            # utterance start, else carried across drains in ``_prev_sample``.
+            prev = self._prev_sample if lpc_start == 0 else float(self._buf[lpc_start - 1])
+            self._process_hop(
+                self._buf[start + pad : start + pad + dsp.FRAME_SIZE],
+                self._buf[lpc_start : lpc_start + self._lpc_frame_size],
+                self._buf[start + pitch_lead : start + pitch_lead + self._pitch_frame_size],
+                prev,
+                result,
+            )
             start += dsp.HOP_SIZE
         if start:
             self._prev_sample = float(self._buf[start - 1])
@@ -378,7 +429,24 @@ class FormantLipsyncAnalyzer(BaseLipsyncAnalyzer):
             self._buf[:remainder] = self._buf[start : self._buf_len]
             self._buf_len = remainder
 
-    def _process_hop(self, raw: np.ndarray, prev_sample: float, result: LipsyncFrameResult):
+    def _process_hop(
+        self,
+        raw: np.ndarray,
+        lpc_raw: np.ndarray,
+        pitch_raw: np.ndarray,
+        prev_sample: float,
+        result: LipsyncFrameResult,
+    ):
+        """Analyze one hop.
+
+        Args:
+            raw: The 25 ms frame (energy, events, nasal spectral features).
+            lpc_raw: The LPC frame centered on the same hop (``raw`` itself
+                when the framings are shared).
+            pitch_raw: The NCC pitch frame centered on the same hop.
+            prev_sample: The sample preceding ``lpc_raw`` (pre-emphasis).
+            result: Accumulates keyframes and events.
+        """
         offset = (self._hops * dsp.HOP_SIZE + dsp.FRAME_SIZE / 2) / dsp.ANALYSIS_SAMPLE_RATE
         self._hops += 1
 
@@ -408,7 +476,7 @@ class FormantLipsyncAnalyzer(BaseLipsyncAnalyzer):
         f1, f2, f3 = self._prev_f1, self._prev_f2, self._prev_f3
         prediction_gain = 0.0
         if rms >= silence_gate:
-            self._window_frame(raw, prev_sample)
+            self._window_frames(lpc_raw, prev_sample)
             lpc = dsp.lpc_coefficients(self._windowed)
             prediction_gain = lpc.prediction_gain
             formants = dsp.lpc_formants(
@@ -416,14 +484,19 @@ class FormantLipsyncAnalyzer(BaseLipsyncAnalyzer):
                 lpc.coefficients,
                 prev=dsp.FormantEstimate(self._prev_f1, self._prev_f2, self._prev_f3, False),
             )
-            pitch = dsp.lpc_residual_pitch(self._windowed, lpc.coefficients)
+            if dsp.PITCH_METHOD == "ncc":
+                pitch = dsp.ncc_pitch(pitch_raw)
+                pitch_voiced = pitch.voiced and rms > _VOICED_MIN_PEAK_FRACTION * self._recent_peak
+            else:
+                pitch = dsp.lpc_residual_pitch(self._windowed, lpc.coefficients)
+                pitch_voiced = pitch.voiced
             # Nasal features use the pre-emphasized spectrum: without the
             # tilt correction the glottal harmonics below 500 Hz dominate the
             # raw power spectrum of every voiced frame (measured ratio ~1.0
             # even for /a/), making the low-band ratio non-discriminative.
-            centroid, low_ratio = dsp.spectral_nasal_features(self._windowed)
-            voiced = pitch.voiced
-            pitch_hz = pitch.frequency
+            centroid, low_ratio = dsp.spectral_nasal_features(self._windowed_short)
+            voiced = pitch_voiced
+            pitch_hz = pitch.frequency if pitch_voiced else 0.0
             clarity = pitch.clarity
             # Per-slot hold: a found F1 is used even when F2 is missing this
             # frame; only the missing slot keeps its previous value. A broad
@@ -558,6 +631,7 @@ class FormantLipsyncAnalyzer(BaseLipsyncAnalyzer):
                     f3=f3 if f3_found else 0.0,
                     pitch_hz=pitch_hz,
                     voiced=voiced,
+                    clarity=clarity,
                     rms=rms,
                     centroid=centroid,
                     low_band_ratio=low_ratio,
@@ -589,12 +663,17 @@ class FormantLipsyncAnalyzer(BaseLipsyncAnalyzer):
             return value + (center - value) * _HOLD_DECAY
         return value
 
-    def _window_frame(self, raw: np.ndarray, prev_sample: float):
-        """Pre-emphasize and window a raw frame into the preallocated scratch."""
+    def _window_frames(self, lpc_raw: np.ndarray, prev_sample: float):
+        """Pre-emphasize the LPC frame and window both framings into scratch."""
         windowed = self._windowed
-        windowed[:] = raw
-        windowed[1:] -= dsp.PRE_EMPHASIS * raw[:-1]
+        windowed[:] = lpc_raw
+        windowed[1:] -= dsp.PRE_EMPHASIS * lpc_raw[:-1]
         windowed[0] -= dsp.PRE_EMPHASIS * prev_sample
+        if self._lpc_pad:
+            pad = self._lpc_pad
+            np.multiply(
+                windowed[pad : pad + dsp.FRAME_SIZE], self._window_short, out=self._windowed_short
+            )
         windowed *= self._window
 
     def _update_adaptation(
