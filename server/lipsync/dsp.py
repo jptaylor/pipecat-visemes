@@ -123,8 +123,11 @@ def _pitch_lag_gain(frame_size: int) -> np.ndarray:
 
 _SPECTRAL_NFFT = 512
 _RFFT_FREQS = np.fft.rfftfreq(_SPECTRAL_NFFT, d=1.0 / ANALYSIS_SAMPLE_RATE).astype(np.float32)
-# Bins strictly below 500 Hz at 16 kHz / 512-point FFT (31.25 Hz per bin).
+# Bins strictly below 500 Hz at 16 kHz / 512-point FFT (31.25 Hz per bin),
+# and the 500-1500 Hz band above it (where a nasal murmur's antiformant sits
+# and where /w u l/ carry their F2).
 _LOW_BAND_BINS = int(500 / (ANALYSIS_SAMPLE_RATE / _SPECTRAL_NFFT))
+_MID_BAND_BINS = int(1500 / (ANALYSIS_SAMPLE_RATE / _SPECTRAL_NFFT))
 
 _TWO_PI = 2.0 * np.pi
 
@@ -472,7 +475,7 @@ def rms_energy(frame: np.ndarray) -> float:
     return float(np.sqrt(np.dot(frame, frame) / frame.shape[0] + EPSILON))
 
 
-def spectral_nasal_features(frame: np.ndarray) -> tuple[float, float]:
+def spectral_nasal_features(frame: np.ndarray) -> tuple[float, float, float]:
     """Compute the spectral features used for nasal detection.
 
     One 512-point rFFT per (windowed) frame.
@@ -482,14 +485,15 @@ def spectral_nasal_features(frame: np.ndarray) -> tuple[float, float]:
 
     Returns:
         Tuple of (spectral centroid in Hz, ratio of energy below 500 Hz to
-        total energy).
+        total energy, ratio of energy in 500-1500 Hz to total energy).
     """
     spectrum = np.fft.rfft(frame, _SPECTRAL_NFFT)
     power = spectrum.real**2 + spectrum.imag**2
     total = float(power.sum()) + EPSILON
     centroid = float(np.dot(power, _RFFT_FREQS)) / total
     low_band_ratio = float(power[:_LOW_BAND_BINS].sum()) / total
-    return centroid, low_band_ratio
+    mid_band_ratio = float(power[_LOW_BAND_BINS:_MID_BAND_BINS].sum()) / total
+    return centroid, low_band_ratio, mid_band_ratio
 
 
 class P2QuantileEstimator:

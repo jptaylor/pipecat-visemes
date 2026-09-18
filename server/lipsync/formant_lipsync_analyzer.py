@@ -103,8 +103,21 @@ _NASAL_F2_MAX_BANDWIDTH_HZ = 300.0
 _NASAL_MISSING_F2_DAMPED = "always"
 _NASAL_DARK_RATIO = 0.9
 _NASAL_SPURIOUS_F2_HZ = 1200.0
+# Enter after this many consecutive hops of nasal evidence, exit after as
+# many without. Never a single hop: a 1-hop fast path on a very dark frame
+# latched on /w u l ð/ and the voice bar of voiced stops (26–29 % of the
+# voiced hops of a nasal-free sentence; 17–19 % without it). The pre-latch
+# soft cap still closes the mouth within one hop. Longer entry or exit
+# windows were measured: 3-hop entry loses hums, 3–4-hop exit brings the
+# false latches back.
 _NASAL_HYSTERESIS_HOPS = 2
-_NASAL_STRONG_RATIO = 0.9  # 1-hop fast path on strong evidence
+# Extra murmur evidence, both disabled (inf): F1 (found or held) at most this,
+# and at most this fraction of spectral energy in 500-1500 Hz (a murmur's
+# antiformant empties that band). Measured on both corpus voices: neither
+# separates murmurs from the dark voiced consonants the detector also latches
+# on (F1 <= 400 and mid <= 0.10 each moved the false duty cycle by ~0.01).
+_NASAL_F1_MAX_HZ = float("inf")
+_NASAL_MID_RATIO_MAX = float("inf")
 _NASAL_OPENNESS = 0.05
 # Pre-latch soft cap: nasal-ish voiced frames cap openness before the event
 # state machine latches, so the continuous signal reacts within one hop.
@@ -117,9 +130,23 @@ _NASAL_SOFT_CAP_RATIO = 0.5
 # tails and room tone read as voiced.
 _VOICED_MIN_PEAK_FRACTION = 0.05
 
-# Conditioning.
+# Conditioning. The median is zero-phase: hop t is conditioned (and its
+# keyframe emitted) when hop t+1 arrives, so the 3-tap median is centered on
+# it instead of trailing it — a trailing median plus the slew put the emitted
+# track ~35 ms behind Praat on both corpus voices (openness r 0.49 at zero lag,
+# 0.71–0.76 at the best lag). The cost is one hop of analysis latency, well
+# inside the processor's emission horizon.
 _MEDIAN_TAPS = 3
-_SLEW_MAX_PER_HOP = 0.25
+# Slew: 0.25 left the emitted track 12–20 ms late after the centered median;
+# 0.4 halves that for +0.02 jitter (mean |second difference| 0.05 -> 0.07);
+# no slew reads +3 ms but jitter 0.09–0.11.
+_SLEW_MAX_PER_HOP = 0.4
+# Anchor keyframe: when a parameter leaves the dead band, first emit the
+# previous hop's value if it was suppressed, so the client interpolates the
+# transition from where the mouth actually was rather than from a keyframe up
+# to a heartbeat old. Off: on both corpus voices it changed openness/width r
+# by 0.00–0.01 and added ~7 keyframes/s.
+_ANCHOR_KEYFRAMES = False
 
 # Hz-domain robustness: a cap on how long an empty slot may hold its last
 # value before decaying toward the prior center, and a jump size treated as
@@ -172,12 +199,15 @@ class LipsyncDebugFrame:
         rms: Frame RMS energy.
         centroid: Spectral centroid in Hz.
         low_band_ratio: Fraction of spectral energy below 500 Hz.
+        mid_band_ratio: Fraction of spectral energy in 500-1500 Hz.
         prediction_gain: LPC prediction gain (0.0 below the silence gate).
         nasal_active: Whether the nasal override was closing the mouth.
         openness_mapped: Openness target from the F1 mapping (or unvoiced
             decay), before the nasal override and conditioning.
         openness_target: Openness target after the nasal override, before
             conditioning.
+        openness_conditioned: Openness after conditioning (the value the
+            keyframe gate sees); the offset it belongs to is ``offset``.
         c_lpc: Formant-plausibility confidence component.
         c_conv: Normalization-convergence confidence component.
         c_snr: SNR confidence component.
@@ -201,10 +231,12 @@ class LipsyncDebugFrame:
     rms: float
     centroid: float
     low_band_ratio: float
+    mid_band_ratio: float
     prediction_gain: float
     nasal_active: bool
     openness_mapped: float
     openness_target: float
+    openness_conditioned: float
     c_lpc: float
     c_conv: float
     c_snr: float
@@ -214,6 +246,18 @@ class LipsyncDebugFrame:
     f1_hi: float
     f2_lo: float
     f2_hi: float
+
+
+@dataclass
+class _PendingHop:
+    """Internal: one hop's keyframe fields, held until its centered median is known."""
+
+    offset: float
+    params: list[float]  # conditioned openness, width, rounding (filled when conditioned)
+    energy: float
+    pitch: float
+    confidence: float
+    event_fired: bool
 
 
 @dataclass
@@ -362,6 +406,7 @@ class FormantLipsyncAnalyzer(BaseLipsyncAnalyzer):
             self._buf[self._buf_len : self._buf_len + self._pad] = 0.0
             self._buf_len += self._pad
         self._drain(result)
+        self._flush_conditioning(result)
         # Everything ingested is final: tail discarded, pending closures dead.
         result.processed_up_to = self._hops * HOP_SECONDS + EVENT_FINALIZE_HORIZON_SEC
         self._reset_utterance_state()
@@ -411,8 +456,10 @@ class FormantLipsyncAnalyzer(BaseLipsyncAnalyzer):
         self._last_adapt = [0.0, 0.0]
         self._adapt_skips = [0, 0]
         self._prev_targets = [_NEUTRAL, _NEUTRAL, _NEUTRAL]  # openness, width, rounding
-        self._median_hist: list[list[float]] = [[], [], []]
+        self._median_hist: list[list[float]] = []  # last _MEDIAN_TAPS target vectors
+        self._pending_hop: _PendingHop | None = None
         self._cond_prev: list[float] | None = None
+        self._last_conditioned: _PendingHop | None = None  # previous hop, emitted or not
         self._last_emitted: list[float] | None = None
         self._last_emit_offset = -1.0
         self._speech_hist: list[bool] = []
@@ -499,6 +546,7 @@ class FormantLipsyncAnalyzer(BaseLipsyncAnalyzer):
         clarity = 0.0
         centroid = 0.0
         low_ratio = 0.0
+        mid_ratio = 0.0
         f1_found = f2_found = f3_found = False
         f1, f2, f3 = self._prev_f1, self._prev_f2, self._prev_f3
         prediction_gain = 0.0
@@ -522,7 +570,7 @@ class FormantLipsyncAnalyzer(BaseLipsyncAnalyzer):
             # tilt correction the glottal harmonics below 500 Hz dominate the
             # raw power spectrum of every voiced frame (measured ratio ~1.0
             # even for /a/), making the low-band ratio non-discriminative.
-            centroid, low_ratio = dsp.spectral_nasal_features(self._windowed_short)
+            centroid, low_ratio, mid_ratio = dsp.spectral_nasal_features(self._windowed_short)
             voiced = pitch_voiced
             pitch_hz = pitch.frequency if pitch_voiced else 0.0
             clarity = pitch.clarity
@@ -599,6 +647,7 @@ class FormantLipsyncAnalyzer(BaseLipsyncAnalyzer):
         speech = rms > 2.0 * max(
             _CLOSURE_FLOOR_MULT * self._noise_floor, _CLOSURE_PEAK_FRACTION * self._recent_peak
         )
+        murmur_shape = (f1 <= _NASAL_F1_MAX_HZ or f1 == 0.0) and mid_ratio <= _NASAL_MID_RATIO_MAX
         event_fired = self._update_events(
             offset,
             rms,
@@ -607,7 +656,7 @@ class FormantLipsyncAnalyzer(BaseLipsyncAnalyzer):
             voiced,
             centroid,
             low_ratio,
-            f2_damped,
+            f2_damped and murmur_shape,
             clarity,
             result,
         )
@@ -673,10 +722,12 @@ class FormantLipsyncAnalyzer(BaseLipsyncAnalyzer):
                     rms=rms,
                     centroid=centroid,
                     low_band_ratio=low_ratio,
+                    mid_band_ratio=mid_ratio,
                     prediction_gain=prediction_gain,
                     nasal_active=self._nasal_active,
                     openness_mapped=openness_mapped,
                     openness_target=openness,
+                    openness_conditioned=float("nan"),  # filled when this hop is conditioned
                     c_lpc=c_lpc,
                     c_conv=c_conv,
                     c_snr=c_snr,
@@ -689,11 +740,16 @@ class FormantLipsyncAnalyzer(BaseLipsyncAnalyzer):
                 )
             )
 
-        # Conditioning: median-3 → slew clamp → dead-band/heartbeat gate.
-        conditioned = self._condition([openness, width, rounding])
-        self._maybe_emit_keyframe(
-            offset, conditioned, energy, pitch_norm, confidence, event_fired, result
-        )
+        # Conditioning: centered median-3 → slew clamp → dead-band/heartbeat
+        # gate. This hop's targets complete the previous hop's median, so the
+        # previous hop is what gets conditioned and emitted now.
+        self._median_hist.append([openness, width, rounding])
+        if len(self._median_hist) > _MEDIAN_TAPS:
+            self._median_hist.pop(0)
+        previous = self._pending_hop
+        self._pending_hop = _PendingHop(offset, [], energy, pitch_norm, confidence, event_fired)
+        if previous is not None:
+            self._condition_and_emit(previous, self._median_hist, result, debug_index=-2)
 
     def _bound_hold(self, slot: int, value: float, found: bool, prior: tuple) -> float:
         if found:
@@ -883,8 +939,7 @@ class FormantLipsyncAnalyzer(BaseLipsyncAnalyzer):
         if nasal_now:
             self._nasal_enter_count += 1
             self._nasal_exit_count = 0
-            enter_hops = 1 if low_ratio > _NASAL_STRONG_RATIO else _NASAL_HYSTERESIS_HOPS
-            if not self._nasal_active and self._nasal_enter_count >= enter_hops:
+            if not self._nasal_active and self._nasal_enter_count >= _NASAL_HYSTERESIS_HOPS:
                 self._nasal_active = True
                 result.events.append(
                     LipsyncEvent(
@@ -909,14 +964,17 @@ class FormantLipsyncAnalyzer(BaseLipsyncAnalyzer):
     # Conditioning & emission
     #
 
-    def _condition(self, targets: list[float]) -> list[float]:
+    def _condition_and_emit(
+        self,
+        hop: _PendingHop,
+        taps: list[list[float]],
+        result: LipsyncFrameResult,
+        debug_index: int,
+    ):
+        """Condition one hop from the target vectors around it, then gate/emit it."""
         conditioned = []
-        for i, target in enumerate(targets):
-            hist = self._median_hist[i]
-            hist.append(target)
-            if len(hist) > _MEDIAN_TAPS:
-                hist.pop(0)
-            value = float(np.median(hist))
+        for i in range(3):
+            value = float(np.median([t[i] for t in taps]))
             if self._cond_prev is not None:
                 prev = self._cond_prev[i]
                 delta = value - prev
@@ -926,40 +984,56 @@ class FormantLipsyncAnalyzer(BaseLipsyncAnalyzer):
                     value = prev - _SLEW_MAX_PER_HOP
             conditioned.append(value)
         self._cond_prev = conditioned
-        return conditioned
+        hop.params = conditioned
+        if self._collect_debug and self.debug_features:
+            self.debug_features[debug_index].openness_conditioned = conditioned[0]
+        self._maybe_emit_keyframe(hop, result)
+        self._last_conditioned = hop
 
-    def _maybe_emit_keyframe(
-        self,
-        offset: float,
-        params: list[float],
-        energy: float,
-        pitch: float,
-        confidence: float,
-        event_fired: bool,
-        result: LipsyncFrameResult,
-    ):
+    def _flush_conditioning(self, result: LipsyncFrameResult):
+        """Condition and emit the last hop (edge-replicated median) at utterance end."""
+        hop = self._pending_hop
+        if hop is None:
+            return
+        self._pending_hop = None
+        taps = self._median_hist[-2:] + self._median_hist[-1:]  # replicate the edge
+        self._condition_and_emit(hop, taps, result, debug_index=-1)
+
+    def _maybe_emit_keyframe(self, hop: _PendingHop, result: LipsyncFrameResult):
+        params = hop.params
         last = self._last_emitted
-        if not event_fired and last is not None:
+        if not hop.event_fired and last is not None:
             moved = max(abs(params[i] - last[i]) for i in range(3))
             # Heartbeats only run while speech is active: during a silence
             # stretch the SILENCE event has already parked the client at
             # neutral, so heartbeats there are pure wire waste.
             silence_active = self._silence_run_hops >= _SILENCE_EVENT_HOPS
             heartbeat_due = (
-                not silence_active and (offset - self._last_emit_offset) >= self._heartbeat_sec
+                not silence_active and (hop.offset - self._last_emit_offset) >= self._heartbeat_sec
             )
             if moved <= self._dead_band and not heartbeat_due:
                 return
-        self._last_emitted = params
-        self._last_emit_offset = offset
+            anchor = self._last_conditioned
+            if (
+                _ANCHOR_KEYFRAMES
+                and moved > self._dead_band
+                and anchor is not None
+                and anchor.offset > self._last_emit_offset
+            ):
+                self._emit_keyframe(anchor, result)
+        self._emit_keyframe(hop, result)
+
+    def _emit_keyframe(self, hop: _PendingHop, result: LipsyncFrameResult):
+        self._last_emitted = hop.params
+        self._last_emit_offset = hop.offset
         result.keyframes.append(
             LipsyncKeyframe(
-                offset=offset,
-                openness=params[0],
-                width=params[1],
-                rounding=params[2],
-                energy=energy,
-                pitch=pitch,
-                confidence=confidence,
+                offset=hop.offset,
+                openness=hop.params[0],
+                width=hop.params[1],
+                rounding=hop.params[2],
+                energy=hop.energy,
+                pitch=hop.pitch,
+                confidence=hop.confidence,
             )
         )

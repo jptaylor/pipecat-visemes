@@ -51,6 +51,7 @@ EXPECT_KEYS = {
     "closures_max",
     "nasals_min",
     "nasals_max",
+    "nasal_fraction_max",
     "silences_min",
     "silences_max",
     "openness_p90_max",

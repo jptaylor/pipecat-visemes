@@ -1,6 +1,6 @@
 # Deep review §2/§6 — validation on real fixtures (2026-09-18)
 
-**Status:** done. DSP bundle landed behind constants; baselines re-saved and committed.
+**Status:** done, two passes. DSP bundle landed behind constants; then the two leads it surfaced (conditioning lag, nasal fast path) — see the second pass at the end. Baselines re-saved and committed after each pass.
 **Input:** `plans/deep-review-2026-09.md` §2 (DSP) and §6.2 (coverage), branch `claude/dazzling-fermi-cxmn8r` @ `1659e98`.
 **Corpus:** 12 sentences × 2 takes × 2 voices — Cartesia `71a7ad14…` (Praat ceiling 5000, the cached fixtures behind the 70.9) and Deepgram `aura-2-helena-en` (ceiling 5500, synthesized for this run). The second voice was not in the brief; it overturned one conclusion and qualified two others, so every row below is reported for both.
 
@@ -78,3 +78,64 @@ CPU: 168 → 201 µs per 20 ms hop (RTF 0.0084 → 0.0101, +20 %); order 16 is +
 | coverage metrics, `--set`, `--tag`, `--ceiling`, per-clip table | harness | keep; next, score coverage and median error as §6.2 proposes |
 
 §6.7: `results/baseline.json` (Cartesia, 84.3), `baseline-deepgram.json` (86.3) and the pre-bundle `baseline-order12-2026-09-17.json` (70.9) are committed. Fixtures are not: provider redistribution terms were not checked.
+
+---
+
+## Second pass (2026-09-18): the two leads
+
+Follow-up on the two leads above — the conditioning loss and the false nasal closures — on the landed DSP bundle, both voices. Reproduce: `uv run python ../plans/experiments/ab_table.py --ladder conditioning [--provider deepgram]`; stage attribution: `openness_stages.py`.
+
+### Harness first
+
+- `openness_lag_ms` / `width_lag_ms` (review §6.3): best cross-correlation shift of our interpolated track against the reference on a 5 ms grid over ±120 ms, positive = ours late, reported only when it improves r by ≥ 0.05 and lies inside the window (else NaN); `*_r_best` is r at that lag. `openness_jitter`: mean |second difference| of the interpolated openness over speech hops (§6.4).
+- `nasal_fraction`: nasal-override duty cycle over Praat-voiced hops, with `nasal_fraction_max` guards on the low-nasal sentences (harvard-03 ≤ 0.20, harvard-02/-04 and bilabial-bob ≤ 0.30). Event counts cannot see a detector that latches on close vowels; the duty cycle can. Six new checks enter the `checks_nasal` bucket, so composites below are not comparable with the first table (the r columns are).
+
+### Lead 1 — conditioning: the loss was almost pure lag
+
+Stage-by-stage openness r against Praat, and the best lag of each stage (both voices, before the change):
+
+| stage | Cartesia r | lag | Deepgram r | lag |
+|---|---|---|---|---|
+| mapped (F1 → openness) | 0.61 | +1 ms | 0.75 | +4 ms |
+| after nasal override | 0.68 | +5 | 0.70 | +6 |
+| after trailing median-3 + slew 0.25 | 0.48 | **+32** | 0.49 | **+38** |
+| emitted keyframes | 0.49 | +33 | 0.50 | +37 |
+| emitted, at its best lag | 0.71 | — | 0.76 | — |
+
+The conditioning stage added 27–32 ms and cost 0.20 r; at the best lag it kept 0.70/0.76 of the target's 0.73/0.78 — timing, not smoothing. Fix ([COND-1]): the median is now zero-phase — hop t is conditioned and its keyframe emitted when hop t+1 arrives (one hop of analysis latency, inside the processor's 0.4 s horizon; events keep their own stamps; chunk-invariant) — and the slew is 0.4/hop.
+
+| variant | Cartesia open_r | width_r | lag | jitter | kf/s | Deepgram open_r | width_r | lag | jitter | kf/s |
+|---|---|---|---|---|---|---|---|---|---|---|
+| before (trailing median, slew 0.25) | 0.49 | 0.49 | +33 | 0.06 | 30.5 | 0.50 | 0.70 | +37 | 0.06 | 33.7 |
+| zero-phase median, slew 0.25 | 0.62 | 0.55 | +19 | 0.05 | 29.7 | 0.63 | 0.76 | +20 | 0.06 | 32.9 |
+| + anchor keyframes | 0.62 | 0.55 | +19 | 0.05 | 37.4 | 0.63 | 0.76 | +21 | 0.06 | 40.6 |
+| **zero-phase, slew 0.4 (landed)** | **0.65** | **0.56** | +4* | 0.06 | 28.5 | **0.69** | **0.77** | +10* | 0.08 | 31.4 |
+| zero-phase, slew 0.6 | 0.66 | 0.57 | — | 0.07 | 27.5 | 0.71 | 0.77 | — | 0.08 | 30.5 |
+| zero-phase, no slew | 0.67 | 0.57 | — | 0.07 | 26.8 | 0.71 | 0.77 | — | 0.09 | 29.7 |
+
+\* per-stage lag from `openness_stages.py`; the harness's `openness_lag_ms` aggregate is noisy once most clips fall under the significance guard. After the change the conditioning stage costs 0.02–0.03 r. Slew above 0.4 buys +0.02 r for visibly more jitter; the anchor keyframe of the review ([COND-1]) changed r by 0.00–0.01 and added 7–8 keyframes/s, so it is landed off (`_ANCHOR_KEYFRAMES`). Keyframe rate fell 2/s.
+
+### Lead 2 — false nasal closures: mostly dark voiced consonants, and a 1-hop latch
+
+What the override was latching on (harvard-03 has no nasal): its dark voiced consonants — "the" ×2 (ð), the voice bar of /d/ in "depth", /v/, /w/ and /l/ in "well"/"tell" — F1 ≈ 260 Hz, no F2 root, > 90 % of the pre-emphasized energy below 500 Hz. Spectrally these *are* murmurs minus the nasal formant, and the mouth is nearly closed during them, which is why the override helps openness_r on Cartesia. So the defect is mostly the NASAL label (and /i u/ frames), not the aperture. Cues measured on both voices against the hum takes: F1 ≤ 400 Hz, a 500–1500 Hz mid-band ratio (antiformant test; now in the debug tap), and run length all fail to separate murmurs from these consonants (each moves the false duty cycle by ~0.01; false runs last 60–120 ms, like a real /m/). What did work: removing the 1-hop fast path (`_NASAL_STRONG_RATIO`; a single hop with low-band ratio > 0.9 latched). Entry now needs 2 consecutive hops; the pre-latch soft cap still closes the mouth within one hop.
+
+| | Cartesia guard duty | harvard-03 | hum duty | Deepgram guard | harvard-03 | hum |
+|---|---|---|---|---|---|---|
+| 1-hop fast path (before) | 0.31 | 0.27 | 0.85 | 0.19 | 0.13 | 0.70 |
+| 2-hop entry (landed) | 0.21 | 0.18 | 0.76 | 0.12 | 0.08 | 0.58 |
+| 3-hop entry | 0.15 | 0.12 | 0.69 | 0.07 | 0.04 | 0.47 |
+
+Hum duty on Deepgram drops because that voice's murmur carries a narrow ~1.55 kHz pole, so its evidence flickers on the 300 Hz bandwidth threshold — but the mouth is at openness 0.00 on those hops anyway (F1 250 sits at the learned floor), and nasal-hum stays 4/4 on both voices. Longer exit holds (3–4 hops) bring the false latches back; a wider F2 band (to 2800–3000 Hz, to stop /i/ reading as "no F2") costs 25 Hz of f2_mae on Cartesia for a small nasal gain and was not kept.
+
+### Result
+
+| | composite | f1_mae | f2_mae | openness_r | width_r | voicing | kf/s | nasal duty | checks |
+|---|---|---|---|---|---|---|---|---|---|
+| Cartesia, DSP bundle (first pass) | 84.3 | 24 | 112 | 0.49 | 0.49 | 0.95 | 30.5 | 0.41 | 20/20 |
+| **Cartesia, + both leads** | **87.5**† | 24 | 112 | **0.65** | **0.56** | 0.95 | 28.5 | 0.32 | 27/28 |
+| Deepgram, DSP bundle | 86.3 | 24 | 75 | 0.50 | 0.70 | 0.85 | 33.7 | 0.28 | 18/20 |
+| **Deepgram, + both leads** | **90.7**† | 24 | 75 | **0.69** | **0.77** | 0.85 | 31.4 | 0.21 | 26/28 |
+
+† with the six new nasal guards in the composite. CPU unchanged (185 µs/hop). Baselines re-saved. Residuals: harvard-02/t2 on Cartesia reads nasal duty 0.41 against the 0.30 bar (a dark sentence: "Glue the sheet to the dark blue background"); Deepgram's nasal-hum openness_p90 is 0.29 against 0.30 — the open hops are the breathy "H" onset, NCC-voiced but with no F1, decaying toward the 0.35 neutral; pause-probe silences on Deepgram (pre-existing).
+
+Next levers, in order: the NASAL event needs a place cue or a rename ("dark voiced closure") before clients style it; keyframe economy (28–31/s vs the 25/s guard — the dead band is a constructor default the harness cannot sweep yet); [CONS-1] energy-gated closures, now that the conditioning no longer hides timing.

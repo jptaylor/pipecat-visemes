@@ -234,12 +234,15 @@ class TestEnergyAndSpectral(unittest.TestCase):
         low = (np.sin(2 * np.pi * 200 * t) * _HAMMING).astype(np.float32)
         high = (np.sin(2 * np.pi * 3000 * t) * _HAMMING).astype(np.float32)
 
-        low_centroid, low_ratio = spectral_nasal_features(low)
-        high_centroid, high_ratio = spectral_nasal_features(high)
+        low_centroid, low_ratio, low_mid = spectral_nasal_features(low)
+        high_centroid, high_ratio, high_mid = spectral_nasal_features(high)
 
         self.assertGreater(low_ratio, 0.9)
         self.assertLess(high_ratio, 0.1)
         self.assertLess(low_centroid, high_centroid)
+        self.assertLess(low_mid + high_mid, 0.1)
+        mid = (np.sin(2 * np.pi * 1000 * t) * _HAMMING).astype(np.float32)
+        self.assertGreater(spectral_nasal_features(mid)[2], 0.9)
 
 
 class TestP2QuantileEstimator(unittest.TestCase):

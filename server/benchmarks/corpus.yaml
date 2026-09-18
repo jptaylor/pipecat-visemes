@@ -38,7 +38,7 @@ sentences:
   - id: bilabial-bob
     text: "Bob put a big pepper in the paper bag."
     tags: [events]
-    expect: { closures_min: 5, closures_max: 14 }
+    expect: { closures_min: 5, closures_max: 14, nasal_fraction_max: 0.30 } # one nasal ("in")
   - id: nasal-hum
     text: "Hmm. Hmm, hmm."
     tags: [events, nasal-guard]
@@ -47,14 +47,26 @@ sentences:
     text: "Wait for it. Now continue talking normally."
     tags: [events]
     expect: { silences_min: 1 }
-  # Phonetically balanced sentences (Harvard set 1) — L1/L2 scoring only.
+  # Phonetically balanced sentences (Harvard set 1) — L1/L2 scoring. The
+  # nasal guards bound the nasal override's duty cycle (fraction of
+  # Praat-voiced hops with the mouth forced shut). The detector has no place
+  # cue, so it also latches on dark voiced consonants (/w l ð/, voice bars)
+  # whose mouth is nearly closed anyway; the bars allow for those — ~20 % on
+  # a nasal-free sentence, 30 % with one nasal — and catch what a 1-hop
+  # latch did (26–50 %).
   - id: harvard-01
     text: "The birch canoe slid on the smooth planks."
   - id: harvard-02
     text: "Glue the sheet to the dark blue background."
+    tags: [nasal-guard]
+    expect: { nasal_fraction_max: 0.30 } # one nasal ("background")
   - id: harvard-03
     text: "It's easy to tell the depth of a well."
+    tags: [nasal-guard]
+    expect: { nasal_fraction_max: 0.20 } # no nasal at all
   - id: harvard-04
     text: "These days a chicken leg is a rare dish."
+    tags: [nasal-guard]
+    expect: { nasal_fraction_max: 0.30 } # one nasal ("chicken")
   - id: harvard-05
     text: "Rice is often served in round bowls."

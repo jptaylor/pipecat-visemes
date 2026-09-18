@@ -52,6 +52,13 @@ def baseline_path(provider: str) -> Path:
 # for t >= this, isolating adaptive-normalization warmup cost.
 POST_CONV_SECS = 1.5
 
+# Timing lag search: our interpolated track is slid against the reference on
+# this grid; the lag is reported only when it improves r by at least
+# LAG_MIN_GAIN and lies strictly inside the window (else NaN). Positive = our
+# track is late.
+LAG_GRID_MS = np.arange(-120, 121, 5)
+LAG_MIN_GAIN = 0.05
+
 # Composite score: component -> (weight, full-marks value, zero-marks value).
 # For higher-is-better metrics full > zero; linear ramp between. PROVISIONAL:
 # frozen after the first eyeballed run — never tune these and the
@@ -77,6 +84,7 @@ CHECKS = {
     "closures_max": ("closures", _LE, "closure"),
     "nasals_min": ("nasals", _GE, "nasal"),
     "nasals_max": ("nasals", _LE, "nasal"),
+    "nasal_fraction_max": ("nasal_fraction", _LE, "nasal"),
     "silences_min": ("silences", _GE, "silence"),
     "silences_max": ("silences", _LE, "silence"),
     "openness_p90_max": ("openness_p90", _LE, "nasal"),
@@ -207,6 +215,7 @@ def compute_metrics(clip: Clip, keyframes, events, debug, ref: Reference) -> dic
     ours_f2 = np.array([d.f2 for d in debug])
     ours_voiced = np.array([d.voiced for d in debug])
     conf = np.array([d.confidence for d in debug])
+    nasal_active = np.array([d.nasal_active for d in debug])
 
     def add_windowed(name: str, values_fn):
         """Store metric for the full clip and the post-convergence window."""
@@ -256,11 +265,21 @@ def compute_metrics(clip: Clip, keyframes, events, debug, ref: Reference) -> dic
     m["f2_scored_n"] = float(l1_f2.sum())
     m["ref_voiced_n"] = float(ref.voiced.sum())
 
+    # Nasal override duty cycle over Praat-voiced hops (reported; bounded by
+    # ``nasal_fraction_max`` on low-nasal sentences). The nasal event count
+    # alone cannot see a detector that latches on close vowels.
+    ref_voiced_n = int(ref.voiced.sum())
+    m["nasal_fraction"] = (
+        float((nasal_active & ref.voiced).sum() / ref_voiced_n) if ref_voiced_n else 0.0
+    )
+
     # L2 — normalized trajectory shape (scale-invariant).
     if len(keyframes) >= 2:
         kf_offs = np.array([k.offset for k in keyframes])
-        ours_open = np.interp(offs, kf_offs, [k.openness for k in keyframes])
-        ours_width = np.interp(offs, kf_offs, [k.width for k in keyframes])
+        kf_open = [k.openness for k in keyframes]
+        kf_width = [k.width for k in keyframes]
+        ours_open = np.interp(offs, kf_offs, kf_open)
+        ours_width = np.interp(offs, kf_offs, kf_width)
         ours_round = np.interp(offs, kf_offs, [k.rounding for k in keyframes])
         ours_energy = np.interp(offs, kf_offs, [k.energy for k in keyframes])
 
@@ -280,6 +299,38 @@ def compute_metrics(clip: Clip, keyframes, events, debug, ref: Reference) -> dic
             if l2.sum() >= 8
             else float("nan")
         )
+
+        # Timing: best cross-correlation shift of our track against the
+        # reference (review §6.3). Pearson r at zero lag cannot tell a late
+        # track from a wrong one; ``*_r_best`` is r at the best lag.
+        def lag(kf_values, ref_track, mask):
+            if mask.sum() < 8:
+                return float("nan"), float("nan")
+            r_by_lag = [
+                _pearson(np.interp(offs - tau / 1000.0, kf_offs, kf_values)[mask], ref_track[mask])
+                for tau in LAG_GRID_MS
+            ]
+            r0 = r_by_lag[len(LAG_GRID_MS) // 2]
+            best = int(np.nanargmax(r_by_lag)) if not np.all(np.isnan(r_by_lag)) else -1
+            if best < 0:
+                return float("nan"), float("nan")
+            r_best = r_by_lag[best]
+            significant = (
+                np.isfinite(r0) and r_best - r0 >= LAG_MIN_GAIN and 0 < best < len(LAG_GRID_MS) - 1
+            )
+            # ours(t - tau) matches ref(t) at tau = -lag, so a late track has
+            # a negative tau; report lag = -tau (positive = our track is late).
+            return (-float(LAG_GRID_MS[best]) if significant else float("nan")), float(r_best)
+
+        l2_width = ref.voiced & np.isfinite(ref.f2)
+        m["openness_lag_ms"], m["openness_r_best"] = lag(kf_open, ref_open, l2)
+        m["width_lag_ms"], m["width_r_best"] = lag(kf_width, ref_width, l2_width)
+
+        # Jitter: mean |second difference| of the interpolated openness over
+        # speech hops (review §6.4 guard; a rougher track is not a better one).
+        speech = ref.intensity_db > np.nanmax(ref.intensity_db) - 25
+        if speech.sum() >= 8:
+            m["openness_jitter"] = float(np.mean(np.abs(np.diff(ours_open, 2))[speech[1:-1]]))
 
         db_ok = np.isfinite(ref.intensity_db)
         m["energy_r"] = _pearson(ours_energy[db_ok], _norm_track(ref.intensity_db, db_ok)[db_ok])
@@ -438,9 +489,15 @@ def report(results: list[ClipResult], run_meta: dict, baseline: dict | None):
         "f1_r",
         "voicing_agreement",
         "openness_r",
+        "openness_r_best",
+        "openness_lag_ms",
         "openness_mae",
+        "openness_jitter",
         "width_r",
+        "width_r_best",
+        "width_lag_ms",
         "energy_r",
+        "nasal_fraction",
         "convergence_s",
         "keyframe_rate",
         "keyframe_rate_speech",
@@ -554,7 +611,10 @@ def apply_overrides(specs: list[str]) -> dict[str, object]:
         try:
             value = ast.literal_eval(raw)
         except (ValueError, SyntaxError):
-            value = raw
+            try:
+                value = float(raw)  # "inf", "nan"
+            except ValueError:
+                value = raw
         setattr(module, name, value)
         applied[target] = value
     return applied
