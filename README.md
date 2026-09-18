@@ -87,7 +87,7 @@ uv run python -m benchmarks.accuracy --offline --compare  # free re-score vs bas
 Scores the analyzer against Praat reference tracks (L1 formant Hz, L2 trajectory shape)
 and corpus expectations (L3 events) — see [plans/benchmark-harness-accuracy.md](plans/benchmark-harness-accuracy.md).
 Baselines are committed: `server/benchmarks/results/baseline.json` (Cartesia voice,
-composite 84.3) and `baseline-deepgram.json` (86.3; `--provider deepgram`); the
+composite 87.5) and `baseline-deepgram.json` (90.7; `--provider deepgram`); the
 pre-DSP-bundle run is kept as `baseline-order12-2026-09-17.json` (70.9). Fixtures are
 not committed. `--set dsp.LPC_ORDER=14` style overrides A/B a tunable without editing
 source.
