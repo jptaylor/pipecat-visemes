@@ -29,11 +29,14 @@ export function StatsBar({ feed }: { feed: LipsyncFeed }) {
         <Stat
           label="lead"
           value={stats?.lastLeadMs != null ? `${stats.lastLeadMs.toFixed(0)}ms` : "—"}
-          title="How far ahead of playout the last batch arrived (target ~200ms)"
+          title="How far ahead of playout the last batch arrived (target ~200ms; the first batch of a turn is often late)"
         />
         <Stat label="resyncs" value={stats ? String(stats.resyncs) : "—"} />
         <Stat label="ctx" value={stats?.ctx ? stats.ctx.slice(0, 8) : "—"} />
-        <label className="trim">
+        <label
+          className="trim"
+          title="Delays (+) or advances (−) the mouth against the audio. The server track is zero-phase (within ~10 ms of the audio), so 0 is the right default; use this for your own playout path."
+        >
           A/V trim {trim >= 0 ? "+" : ""}
           {trim}ms
           <input

@@ -9,8 +9,10 @@
 Defines the articulation signal produced by lipsync analyzers: continuous
 keyframes (mouth openness/width/rounding plus energy and pitch) and discrete
 events (closures, nasals, silence). The server sends these parameters — never
-mouth geometry — and clients map them onto their own mouth model, gating how
-far from a neutral shape to commit by each sample's confidence.
+mouth geometry — and clients map them onto their own mouth model. Each
+sample's confidence is a per-hop evidence value for diagnostics and the
+benchmark; on real speech it mostly tracks loudness (mean ~0.15), so clients
+should not scale the pose or its opacity by it.
 """
 
 from dataclasses import dataclass
@@ -46,8 +48,11 @@ class LipsyncKeyframe:
         rounding: Lip rounding (0 = unrounded, 1 = rounded /u/).
         energy: Log-compressed RMS envelope, for client secondary motion.
         pitch: Pitch normalized within the session range; 0 if unvoiced.
-        confidence: Estimation confidence (0..1); gates how far from a
-            neutral (schwa) shape the client should commit.
+        confidence: Per-hop estimation evidence (0..1): slot plausibility ×
+            frame-to-frame stability × LPC fit × SNR × convergence. A
+            diagnostic, not a blend weight — it tracks loudness on real
+            speech, so scaling the pose or its opacity by it fades quiet
+            syllables.
     """
 
     offset: float

@@ -77,7 +77,7 @@ CPU: 168 → 201 µs per 20 ms hop (RTF 0.0084 → 0.0101, +20 %); order 16 is +
 | `f1_broad` path | — | keep (vowel-aa strict F1 coverage 0.78 / 0.85 < 0.9) |
 | coverage metrics, `--set`, `--tag`, `--ceiling`, per-clip table | harness | keep; next, score coverage and median error as §6.2 proposes |
 
-§6.7: `results/baseline.json` (Cartesia, 84.3), `baseline-deepgram.json` (86.3) and the pre-bundle `baseline-order12-2026-09-17.json` (70.9) are committed. Fixtures are not: provider redistribution terms were not checked.
+§6.7: `results/baseline.json` (Cartesia) and `baseline-deepgram.json` are committed and re-saved after each pass; the pre-bundle 70.9 run is not kept as a file (its numbers are the row 0 tables above). Fixtures are not committed: provider redistribution terms were not checked.
 
 ---
 

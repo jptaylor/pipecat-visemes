@@ -16,7 +16,9 @@ const EVENT_LABELS: Record<LipsyncEventKind, string> = {
  * Parametric mouth driven by the feed at display refresh rate.
  *
  * openness -> vertical aperture, width -> corner spread, rounding -> pucker
- * (narrower + taller + rounder), energy -> glow, confidence -> opacity.
+ * (narrower + taller + rounder), energy -> glow. Confidence is a per-hop
+ * evidence value (it tracks loudness on real speech, mean ~0.15) and is shown
+ * in the meters only — it must not fade or flatten the mouth.
  * DOM updates go through refs so React never re-renders on animation.
  */
 export function Mouth({ feed }: { feed: LipsyncFeed }) {
@@ -80,7 +82,6 @@ export function Mouth({ feed }: { feed: LipsyncFeed }) {
       }
 
       if (groupRef.current) {
-        groupRef.current.setAttribute("opacity", (0.4 + 0.6 * s.confidence).toFixed(2));
         groupRef.current.style.filter = `drop-shadow(0 0 ${(s.energy * 22).toFixed(0)}px var(--energy))`;
       }
 

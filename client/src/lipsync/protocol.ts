@@ -23,6 +23,10 @@ export interface LipsyncKeyframe {
   rounding: number;
   energy: number;
   pitch: number;
+  /**
+   * Per-hop estimation evidence (0..1). Diagnostic only: it tracks loudness
+   * on real speech (mean ~0.15), so it must not scale the pose or its opacity.
+   */
   confidence: number;
 }
 

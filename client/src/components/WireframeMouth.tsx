@@ -100,8 +100,10 @@ function fillDot(ctx: CanvasRenderingContext2D, p: Point, size: number): void {
  * by thin lines, radial spokes between the rings, and wireframe teeth/tongue
  * contours clipped inside the inner ring. Same articulation semantics as the
  * classic Mouth (openness -> aperture, width -> spread, rounding -> pucker,
- * teeth/tongue fade thresholds), plus energy -> vertex glow/size,
- * confidence -> alpha, pitch -> subtle corner-lift bias. Canvas drawing
+ * teeth/tongue fade thresholds), plus energy -> vertex glow/size and
+ * pitch -> subtle corner-lift bias. Confidence is a per-hop evidence value
+ * (it tracks loudness on real speech, mean ~0.15) shown in the meters only;
+ * it does not modulate alpha. Canvas drawing
  * driven by the feed at display refresh rate; React never re-renders on
  * animation.
  */
@@ -171,7 +173,6 @@ export function WireframeMouth({ feed }: { feed: LipsyncFeed }) {
       );
       const innerPath = ringPath(inner);
 
-      const confAlpha = 0.4 + 0.6 * s.confidence;
       ctx.clearRect(0, 0, VIEW_W, VIEW_H);
 
       // Teeth: same fade conditions as the classic mouth, drawn as an
@@ -185,7 +186,7 @@ export function WireframeMouth({ feed }: { feed: LipsyncFeed }) {
         const th = Math.min(16, h * 0.3);
         ctx.save();
         ctx.clip(innerPath);
-        ctx.globalAlpha = teethAlpha * confAlpha * 0.8;
+        ctx.globalAlpha = teethAlpha * 0.8;
         ctx.strokeStyle = vertex;
         ctx.lineWidth = 1;
         ctx.strokeRect(tx0, ty, tw, th);
@@ -212,7 +213,7 @@ export function WireframeMouth({ feed }: { feed: LipsyncFeed }) {
         const trY = h * 0.26;
         ctx.save();
         ctx.clip(innerPath);
-        ctx.globalAlpha = tongueAlpha * confAlpha * 0.9;
+        ctx.globalAlpha = tongueAlpha * 0.9;
         ctx.strokeStyle = tongue;
         ctx.lineWidth = 1;
         ctx.beginPath();
@@ -236,7 +237,7 @@ export function WireframeMouth({ feed }: { feed: LipsyncFeed }) {
       // Spokes under the rings.
       ctx.strokeStyle = lips;
       ctx.lineWidth = 1;
-      ctx.globalAlpha = 0.3 * confAlpha;
+      ctx.globalAlpha = 0.3;
       ctx.beginPath();
       for (let i = 0; i < outer.length; i++) {
         ctx.moveTo(outer[i].x, outer[i].y);
@@ -245,14 +246,14 @@ export function WireframeMouth({ feed }: { feed: LipsyncFeed }) {
       ctx.stroke();
 
       // Ring contours.
-      ctx.globalAlpha = 0.9 * confAlpha;
+      ctx.globalAlpha = 0.9;
       ctx.lineWidth = 1.2;
       ctx.stroke(ringPath(outer));
       ctx.lineWidth = 1;
       ctx.stroke(innerPath);
 
       // Square vertices on top; energy drives glow and size.
-      ctx.globalAlpha = confAlpha;
+      ctx.globalAlpha = 1;
       ctx.fillStyle = vertex;
       ctx.shadowColor = glow;
       ctx.shadowBlur = 14 * s.energy;
