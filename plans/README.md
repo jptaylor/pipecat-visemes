@@ -36,24 +36,26 @@ reason — but that is not what item 1 is. The distinction is the whole design: 
 optional prior that gates and refines what the DSP already produces, with a DSP fallback on every
 path, so a provider that sends no text (or sends it late, or renormalized) is exactly as well served
 as today. A tier that replaces the signal would break the drop-in property; one that refines it does
-not. The
-project stays a standalone example app; it is not being upstreamed into pipecat (decided
+not. The project stays a standalone example app; it is not being upstreamed into pipecat (decided
 2026-09-17, [pipecat-1.10-update.md](pipecat-1.10-update.md)).
 
 ## Where it stands
 
 Baselines committed 2026-09-19 (`server/benchmarks/results/baseline*.json`), 12 sentences × 2
-takes per voice, scored against Praat and the corpus expectations:
+takes per voice, scored against Praat and the corpus expectations. The Cartesia column pools
+seven voices (three masculine, three feminine library voices plus the quickstart voice; per voice
+79.8–93.6), the Deepgram column is one voice:
 
 | | Cartesia (`71a7ad14…`) | Deepgram (`aura-2-helena-en`) |
 |---|---|---|
-| composite (v1 + nasal guards) | **87.5** | **92.0** |
-| f1_mae / f2_mae (Hz, committed hops) | 24 / 113 | 24 / 75 |
-| openness_r / width_r vs Praat | 0.62 / 0.57 | 0.74 / 0.79 |
-| voicing agreement with Praat | 0.95 | 0.85 |
-| conditioning lag (per-stage) | +4 ms | +10 ms |
-| keyframes / s | 29.7 | 31.1 |
-| corpus checks | 31/32 | 30/32 |
+| composite (v1 + nasal guards) | **86.0** (7 voices) | **91.9** |
+| f1_mae / f2_mae (Hz, committed hops) | 31 / 113 | 24 / 75 |
+| F1 / F2 coverage of Praat-voiced hops | 0.81 / 0.78 | 0.91 / 0.81 |
+| openness_r / width_r vs Praat | 0.64 / 0.63 | 0.73 / 0.79 |
+| voicing agreement with Praat | 0.93 | 0.85 |
+| conditioning lag (per-stage, quickstart voice) | +4 ms | +10 ms |
+| keyframes / s | 29.5 | 31.1 |
+| corpus checks | 204/224 | 30/32 |
 
 CPU: ~185 µs per hop (RTF ≈ 0.009). Tests: 55 (`server/tests/`, including the eval recorder's replay, the delivery schedule and a synthetic back vowel that must not read as a murmur). Before the September work the same corpus read
 70.9 / 85.6.
@@ -71,19 +73,18 @@ in place of the forced-shut override, rounding no longer gated off for small ope
 nasal-duty guards on the vowel sentences; Deepgram 90.7 → 92.0, Cartesia unchanged at 87.5 with
 four more checks passing.
 
-Accepted residuals: Cartesia vowel-oo/t2 nasal duty 0.454 against the 0.45 bar; Deepgram
-nasal-hum openness p90 0.29 against 0.30 (the breathy "H" onset); Deepgram pause-probe has no
-300 ms silence (that voice's pause is shorter).
+A fourth pass the same day widened the Cartesia corpus to seven voices (results note, fourth
+pass): the vowel tracking generalizes (F1 error 14–49 Hz, openness_r 0.59–0.70 per voice), the
+event detectors did not. Landed: the SILENCE event at 200 ms (was 300; pauses on six of seven
+voices are shorter), a stale F1 drifting toward closed rather than mid-open (which had opened the
+mouth during hums with no findable F1), Praat ceilings by pitch, and a mama closure bar that only
+guards against no dips at all.
 
-**Seven voices (2026-09-19), not yet reproducible from this branch.** A Cartesia run over seven
-voices found the continuous mapping intact (f1_mae 14–49 Hz, openness_r 0.57–0.70, width_r
-0.57–0.76) and the categorical detectors broken on the new voices — hum probe 5 of 6, bilabial
-closure counts 4 of 6, pause silence 6 of 6, plus F2 loss on male voices. That run is the evidence
-behind Steps forward item 1, and **nothing in the tree reproduces it**: `corpus.yaml` still lists
-two voices, `fixtures/` is gitignored, and `results/` un-ignores only `baseline*.json`, so the
-per-voice results were never committable. Landing a seven-voice corpus and a committed per-voice
-summary is stage 0 of [text-informed-events.md](text-informed-events.md) and gates everything after
-it. Expect the composite to move when five voices join the mean; re-baseline and say so.
+Accepted residuals: the NASAL event never fires on four voices whose hums are bright or breathy
+(no single-frame cue separates them from vowels; see the results note), three hum takes whose
+audio has a vowel-like F1, pauses under 200 ms on four takes, one deep-voice mama take with a
+single dip, Ronald's vowel-aa/t2 openness peak, and the quickstart vowel-oo/t2 nasal duty 0.454
+against 0.45; on Deepgram the nasal-hum openness p90 0.29 against 0.30 and the pause probe.
 
 Tooling since the baselines (2026-09-19): the **eval recorder** (`server/benchmarks/record.py`,
 `eval_corpus.yaml`, 19 lines; `tests/test_eval_record.py`) speaks the corpus through the real output path — `LipsyncProcessor`,
@@ -138,7 +139,9 @@ Reading the numbers — caveats that apply to every future comparison:
 - `f1_mae`/`f2_mae` only score committed hops: a voicing change can raise MAE with bit-identical
   formant tracks. Use `experiments/ab_matched.py` (matched hops) before believing an MAE delta.
 - Single-voice tuning is unsafe; the nasal "missing F2 = damped" rule looked free on Cartesia and
-  lost the hums on Deepgram. Always run both providers.
+  lost the hums on Deepgram, and every event detector tuned on the quickstart voice failed on
+  four of six library voices. Run all seven Cartesia voices and Deepgram; a fresh checkout
+  synthesizes the Cartesia fixtures in about three minutes.
 - Real prediction gain is 19–31 (median), so `_C_FIT_LOG10_FULL` is 3.2; confidence is a
   diagnostic, not a pose or opacity scale.
 
@@ -151,31 +154,46 @@ are measured with the eval recorder (`--reanalyze` on the same audio) before and
 
 1. **[Text-informed events](text-informed-events.md).** The 2026-09-19 seven-voice Cartesia run
    split the analyzer in two: the continuous mapping holds across voices (f1_mae 14–49 Hz,
-   openness_r 0.57–0.70, width_r 0.57–0.76) while every categorical detector breaks — the hum probe
-   fails on 5 of 6 new voices, bilabial closures under-count on 4 of 6, the pause probe's silence
-   fails on 6 of 6. Openness/width/rounding adapt per voice; the event thresholds are absolute and
-   were fitted to one spectrum. So: **text for the categorical decisions, DSP for the continuous
-   ones**, in three staged steps (CMUdict prior → fixed-lag alignment → a conditional learned
-   emission scorer), text always optional with a DSP fallback. Plan, evidence and measurement gates
-   in [text-informed-events.md](text-informed-events.md); note that two of the four seven-voice
-   failures (the pause threshold, male-voice F2) are DSP work that the text tier must not take
-   credit for, and that this branch cannot yet reproduce the run (stage 0).
-2. **NASAL event semantics.** Back vowels no longer read as murmurs (2026-09-19 veto), but the
-   override still latches on dark voiced consonants (ð, /w l/, voice bars) — spectrally murmurs,
-   mouth nearly closed, so the aperture is right but the label is wrong (harvard-03 duty
-   0.09–0.15). It needs a place cue or a broader name ("dark voiced closure") before clients style
-   it. Rounding is F2-only and marks any low-F2 vowel (/ɑ ɔ/) as rounded ([ROUND-1]).
+   openness_r 0.59–0.70, width_r 0.56–0.76) while the categorical detectors broke on the new
+   voices — on the first run the hum probe failed on 5 of 6, bilabial closures under-counted on
+   3 of 6, the pause probe's silence failed on 6 of 6. Openness/width/rounding adapt per voice; the
+   event thresholds are absolute and were fitted to one spectrum. So: **text for the categorical
+   decisions, DSP for the continuous ones**, in three staged steps (CMUdict prior → fixed-lag
+   alignment → a conditional learned emission scorer), text always optional with a DSP fallback.
+   Plan, evidence and measurement gates in [text-informed-events.md](text-informed-events.md).
+   Its stage 0 (a reproducible seven-voice corpus and baseline) landed the same day, as did the
+   two failures that were DSP work and not the text tier's to claim (the pause threshold, now
+   200 ms; male-voice F2, a Praat-ceiling matter): what remains for text is the nasal label on
+   bright/breathy voices and the /m/ closures on deep ones, items 2 and 5.
+   Stage 1 is implemented, opt-in, on `codex/text-informed-events`: packed CMUdict,
+   conservative inventory/hum priors and causal word-timed hints. Default DSP and `main`
+   remain unchanged. [The stage-1 review](text-informed-events-stage1-results.md) compares
+   accuracy, delivery latency, CPU and allocations; improvements are not uniform, so it
+   is not ready to replace the baseline. The earlier input-only checkpoint is retained in
+   [its results note](text-informed-events-results.md).
+2. **The nasal detector across voices.** Its murmur evidence is "dark spectrum + damped F2",
+   which holds on three of seven Cartesia voices and the Deepgram voice; on the other four the
+   hum is as bright as their vowels and NASAL never fires (the mouth still closes on most of them
+   since a stale F1 now drifts toward closed). The feature study in the results note found no
+   single-frame cue; a murmur cue that works across voices probably needs temporal structure
+   (stationarity, level relative to the surrounding vowels) or a place cue. Also still true: on
+   the voices where it does fire it latches on dark voiced consonants (ð, /w l/, voice bars) with
+   the aperture right and the label wrong, and rounding is F2-only, so /ɑ ɔ/ read as rounded
+   ([ROUND-1]).
 3. **Keyframe economy.** 28–31/s against the 25/s guard. The dead band is a constructor default
    the harness cannot sweep; expose it to `--set`, then decide.
 4. **[CONS-1] Energy-gated closures.** The mouth should close with the energy dip instead of only
    badging the event (openness sits at ~0.44 during a /p b m/ today). Now that conditioning no
    longer hides timing, this is measurable with the existing checks.
-5. **Processor hygiene** (review §7, unchanged since): a ≥ 2 s burst on the frame path silently
+5. **Closures on deep voices.** The energy-dip detector under-counts /m/ dips where the murmur
+   is nearly as loud as the vowels (Ronald, Daniel, Jolene); thresholds do not fix it in either
+   direction. The review's [CONS-1] energy-gated aperture and text-gated events are the routes.
+6. **Processor hygiene** (review §7, unchanged since): a ≥ 2 s burst on the frame path silently
    drops audio and misplaces the SILENCE ([PROC-1], relevant to HTTP-burst providers); the stream
    resampler is never flushed at context close, so the last 40–60 ms of every context is not
    analyzed ([PROC-2]); evicting an unflushed context leaks its hops into the next (B13);
    `dead_band`/`heartbeat_ms` runtime updates are silent no-ops (B14).
-6. **Client.** Events are shown as a badge but never shape the pose ([CLIENT-2]); a new
+7. **Client.** Events are shown as a badge but never shape the pose ([CLIENT-2]); a new
    context's first batch wipes the previous context's tail (B17).
 The remaining review §7 items not listed here (F3 hold, rounding gate, closures pending at flush,
 harness `--warm`/`--voices` bugs) are small and unaddressed; take them when touching the code
@@ -227,7 +245,7 @@ the issue is not precision, it is that the categorical detectors do not survive 
 | File | Status | Use it for |
 |---|---|---|
 | `README.md` (this file) | plan of record | status, findings, open / parked / not planned |
-| [text-informed-events.md](text-informed-events.md) | planned (2026-09-19) | the text tier: evidence, stages, measurement gates, what text will not fix |
+| [text-informed-events.md](text-informed-events.md) | stage 1 experimental (2026-09-19) | the text tier: evidence, stages, measurement gates, what text will not fix |
 | [technical-specification.md](technical-specification.md) | design of record, as built (delta table at the top) | the design and its rationale |
 | [benchmark-harness-accuracy.md](benchmark-harness-accuracy.md) | built (2026-07); as-built notes at the top | how the accuracy score is made and read |
 | [deep-review-2026-09-results.md](deep-review-2026-09-results.md) | done (2026-09-18) | the current numbers, what each DSP change bought, how to read the benchmark |

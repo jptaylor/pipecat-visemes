@@ -27,7 +27,7 @@ from lipsync.base_lipsync_analyzer import (
     BaseLipsyncAnalyzer,
     LipsyncFrameResult,
 )
-from lipsync.formant_lipsync_analyzer import FormantLipsyncAnalyzer
+from lipsync.formant_lipsync_analyzer import _UTTERANCE_CLOSE_SEC, FormantLipsyncAnalyzer
 from lipsync.frames import LipsyncUpdateSettingsFrame, TTSLipsyncFrame
 from lipsync.lipsync_processor import LipsyncParams, LipsyncProcessor
 from lipsync.rtvi import LipsyncMessageRelay, lipsync_message_data
@@ -292,7 +292,10 @@ class TestLipsyncProcessor(unittest.IsolatedAsyncioTestCase):
             self.assertTrue(frames_for_context)
             for frame in frames_for_context:
                 for keyframe in frame.keyframes:
-                    self.assertLessEqual(keyframe.offset, 0.75)
+                    # 0.7 s of audio plus the closing keyframe flush() adds
+                    # _UTTERANCE_CLOSE_SEC past the end; anything beyond that
+                    # would be the other context's audio leaking in.
+                    self.assertLessEqual(keyframe.offset, 0.75 + _UTTERANCE_CLOSE_SEC)
 
         all_lipsync = lipsync_frames(received_down)
         self.assertEqual(
@@ -336,7 +339,9 @@ class TestLipsyncProcessor(unittest.IsolatedAsyncioTestCase):
         self.assertEqual([f.release_ns for f in lipsync], sorted(f.release_ns for f in lipsync))
         for frame in lipsync:
             for keyframe in frame.keyframes:
-                self.assertLessEqual(keyframe.offset, 0.85)
+                # Per segment: 0.8 s of audio plus flush()'s closing keyframe.
+                # A leak across the reopen would land near 1.6 s.
+                self.assertLessEqual(keyframe.offset, 0.85 + _UTTERANCE_CLOSE_SEC)
 
     async def test_playout_gap_shifts_later_batches(self):
         # 0.5 s of audio, then a stall longer than its playout: the audio

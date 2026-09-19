@@ -9,9 +9,17 @@
 import unittest
 
 import numpy as np
+from pipecat.frames.frames import AggregatedTextFrame, TTSStartedFrame, TTSTextFrame
 from pipecat.processors.frameworks.rtvi import RTVIServerMessageFrame
 
-from benchmarks.record import Example, _Recorder, _run_examples, _Source, _strip_gaps
+from benchmarks.record import (
+    Example,
+    _Recorder,
+    _replay_frames,
+    _run_examples,
+    _Source,
+    _strip_gaps,
+)
 from lipsync.frames import TTSLipsyncFrame
 from tests.synth import synth_vowel
 
@@ -47,10 +55,13 @@ class TestEvalRecorder(unittest.IsolatedAsyncioTestCase):
 
         self.assertTrue(clean)
         (take,) = takes
-        # Audio as played: the TTS audio, padded out to whole transport writes.
-        self.assertEqual(take.pcm[: len(pcm)], pcm)
-        self.assertLess(len(take.pcm) - len(pcm), CHUNK_BYTES)
-        self.assertEqual(take.arrival["gaps"], [])
+        # The simulated device can run dry briefly under scheduler jitter,
+        # even with a fast source. Its recorded gaps are part of "as played",
+        # not corruption of the source audio. Verify exact recovery plus
+        # bounded transport padding, rather than assuming a real-time OS.
+        gaps = take.arrival["gaps"]
+        self.assertEqual(_strip_gaps(take.pcm, gaps, len(pcm)), pcm)
+        self.assertLess(len(take.pcm) - len(pcm) - sum(size for _, size in gaps), CHUNK_BYTES)
 
         self.assertTrue(take.messages)
         for message in take.messages:
@@ -92,6 +103,62 @@ class TestEvalRecorder(unittest.IsolatedAsyncioTestCase):
         # 4 bytes of stall silence inside, 2 bytes of write padding at the end.
         played = b"ab" + bytes(4) + b"cdef" + bytes(2)
         self.assertEqual(_strip_gaps(played, [[2, 4]], 6), b"abcdef")
+
+    def test_replay_keeps_early_late_and_untimestamped_anchors(self):
+        arrival, pcm = retained_take(0.4)
+        arrival["anchors"] = [[-0.02, -0.01, "First."], [0.05, None, "Late."]]
+        arrival["words"] = [[0.03, 0.12, "First"]]
+        frames = _replay_frames(arrival, pcm, 10_000_000_000)
+        self.assertIsInstance(frames[0][1], AggregatedTextFrame)
+        self.assertEqual(frames[0][0], -0.02)
+        self.assertEqual(frames[0][1].pts, 9_990_000_000)
+        self.assertTrue(frames[0][1].will_be_spoken)
+        self.assertIsInstance(frames[1][1], TTSStartedFrame)
+        words = [f for _, f in frames if isinstance(f, TTSTextFrame)]
+        self.assertEqual(words[0].pts, 10_120_000_000)
+        late = next((t, f) for t, f in frames if getattr(f, "text", "") == "Late.")
+        self.assertEqual(late[0], 0.05)
+        self.assertIsNone(late[1].pts)
+
+    def test_legacy_text_is_opt_in_and_never_fills_observed_no_text(self):
+        arrival, pcm = retained_take(0.4)
+
+        def anchors(frames):
+            return [
+                f
+                for _, f in frames
+                if isinstance(f, AggregatedTextFrame) and not isinstance(f, TTSTextFrame)
+            ]
+
+        self.assertFalse(anchors(_replay_frames(arrival, pcm, 0)))
+        supplied = anchors(_replay_frames(arrival, pcm, 0, assumed_text="Legacy."))
+        self.assertEqual(supplied[0].text, "Legacy.")
+        self.assertIsNone(supplied[0].pts)
+        arrival["anchors"] = []  # captured no text, not a missing observation
+        self.assertFalse(anchors(_replay_frames(arrival, pcm, 0, assumed_text="Legacy.")))
+
+    async def test_record_replay_roundtrip_retains_text_and_observes_it(self):
+        arrival, pcm = retained_take(0.4)
+        arrival["anchors"] = [[-0.01, 0.0, "Vowel."]]
+        arrival["words"] = [[0.02, 0.04, "Vowel"]]
+        example = Example(id="vowel", text="Vowel.", tags=[], look_for="")
+        takes, clean = await _run_examples(
+            [example],
+            _Source(arrivals={"vowel": arrival}, pcm={"vowel": pcm}),
+            SAMPLE_RATE,
+            text_prior=True,
+        )
+        self.assertTrue(clean)
+        (take,) = takes
+        self.assertEqual(take.stats["text_anchors"], 1)
+        self.assertEqual(take.stats["text_words"], 1)
+        ((received, pts, text),) = take.arrival["anchors"]
+        self.assertLess(received, 0)
+        self.assertEqual(text, "Vowel.")
+        self.assertEqual(take.arrival["words"][0][2], "Vowel")
+        # Subtracting the same captured start retains the anchor/word clock
+        # difference even though the replay's absolute origin is different.
+        self.assertAlmostEqual(take.arrival["words"][0][1] - pts, 0.04, places=3)
 
 
 if __name__ == "__main__":

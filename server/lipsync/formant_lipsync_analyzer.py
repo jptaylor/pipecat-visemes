@@ -22,6 +22,8 @@ from lipsync.base_lipsync_analyzer import (
     LipsyncAnalysisContext,
     LipsyncFrameResult,
 )
+from lipsync.pronunciation import load_lexicon
+from lipsync.text_events import TextEvents
 from lipsync.types import LipsyncEvent, LipsyncEventKind, LipsyncKeyframe
 
 # Analysis hop duration in seconds (20 ms).
@@ -37,6 +39,30 @@ EVENT_FINALIZE_HORIZON_SEC = 0.4
 _NEUTRAL = 0.35
 _SILENCE_REST_OPENNESS = 0.15
 _UNVOICED_DECAY = 0.8
+
+# Utterance end. Audio simply stops at a turn end: there is no trailing
+# silence to decay through, the unvoiced decay (a factor of _UNVOICED_DECAY
+# per hop, ~15 hops to reach rest) is cut off wherever the last sample falls,
+# and SILENCE needs _SILENCE_EVENT_HOPS of sub-threshold audio it never gets.
+# The last measured keyframe is therefore mid-decay with the mouth still open
+# — measured 0.45 openness on an /a/ with 80 ms of trailing silence — and the
+# client, having no keyframe after it, holds that pose and eases out over
+# roughly a second. So the analyzer states the ending explicitly: one rest
+# keyframe this far past the last analyzed hop, which the client interpolates
+# into and which matches the pose it falls back to, so nothing moves after it.
+# Kept well inside the client's cut() grace window (CUT_GRACE_SEC, 150 ms in
+# feed.ts) so a natural turn end does not discard it; raising one means
+# raising the other.
+_UTTERANCE_CLOSE_SEC = 0.1
+# The pose the mouth closes to: what the unvoiced decay above converges to
+# once the energy is under the silence gate, so a clip that already ended at
+# rest is recognised as such and gets no extra keyframe. (The client's own
+# REST_POSE fallback in feed.ts agrees on openness and width but rests
+# rounding at 0.1 rather than _NEUTRAL; on a mouth this closed the difference
+# is not visible, but the two should be reconciled.)
+_REST_POSE = (_SILENCE_REST_OPENNESS, _NEUTRAL, _NEUTRAL)
+# Below this much movement the mouth is already at rest; no keyframe needed.
+_REST_EPSILON = 0.02
 
 # Generic formant priors (Hz); shifted up for high-pitched voices.
 _F1_PRIOR = (250.0, 900.0)
@@ -74,7 +100,11 @@ _LOG_COMPRESSION = 9.0
 # Silence: sustained sub-threshold energy emits one SILENCE event.
 _SILENCE_FLOOR_MULT = 2.5
 _SILENCE_ABS = 1e-4
-_SILENCE_EVENT_HOPS = 15  # 300 ms
+# 200 ms: measured across seven TTS voices, mid-sentence pauses run 235-430 ms
+# by intensity but shorter under the silence gate; at 300 ms the pause probe
+# fired on one voice in seven, at 200 ms on most, with no spurious events on
+# the phonetically balanced sentences (160 ms starts adding them).
+_SILENCE_EVENT_HOPS = 10
 
 # Closure (M/B/P): a short, bounded energy dip inside a speech region.
 _CLOSURE_FLOOR_MULT = 3.0
@@ -176,6 +206,12 @@ _ANCHOR_KEYFRAMES = False
 # a spike when feeding the adaptive estimators.
 _HOLD_MAX_HOPS = 3
 _HOLD_DECAY = 0.1
+# Where a stale F1 drifts: 0.0 = the prior's low edge (a voiced frame with no
+# findable F1, strict or broad, is a murmur or a close vowel far more often
+# than a mid vowel — measured across seven voices, hums lack F1 on 60-73 % of
+# their hops on four of them while vowels lack it on 5-21 %), 0.5 = the prior
+# center (the 2026-07 behaviour, which opened the mouth half-way during hums).
+_F1_HOLD_DRIFT = 0.0
 _ADAPT_SPIKE_HZ = 400.0
 _ADAPT_MAX_SKIPS = 2
 
@@ -330,6 +366,7 @@ class FormantLipsyncAnalyzer(BaseLipsyncAnalyzer):
         dead_band: float = 0.05,
         heartbeat_ms: int = 240,
         collect_debug: bool = False,
+        text_events_enabled: bool = False,
     ):
         """Initialize the analyzer.
 
@@ -341,11 +378,14 @@ class FormantLipsyncAnalyzer(BaseLipsyncAnalyzer):
                 silence stretches (the SILENCE event parks the client).
             collect_debug: When True, collect one :class:`LipsyncDebugFrame`
                 per hop in :attr:`debug_features` (dev/benchmark use only).
+            text_events_enabled: Experimental English categorical priors.
+                Missing/untrusted text retains the DSP path; off by default.
         """
         self._dead_band = dead_band
         self._heartbeat_sec = heartbeat_ms / 1000.0
         self._collect_debug = collect_debug
         self.debug_features: list[LipsyncDebugFrame] = []
+        self._text_events = TextEvents() if text_events_enabled else None
 
         # Three framings share each hop center: the 25 ms frame (energy,
         # events, nasal spectral features), the LPC frame (formants, residual
@@ -390,8 +430,21 @@ class FormantLipsyncAnalyzer(BaseLipsyncAnalyzer):
             sample_rate: Source sample rate of the TTS audio in Hz (analysis
                 itself always runs at 16 kHz; the processor resamples).
         """
+        if self._text_events is not None:
+            load_lexicon()  # Once per process, outside audio processing.
         self._reset_session_state()
         self._reset_utterance_state()
+
+    @property
+    def text_stats(self) -> dict[str, int]:
+        return dict(self._text_events.stats) if self._text_events is not None else {}
+
+    def set_text_events_enabled(self, enabled: bool):
+        if enabled and self._text_events is None:
+            load_lexicon()
+            self._text_events = TextEvents()
+        elif not enabled:
+            self._text_events = None
 
     async def analyze(self, pcm: np.ndarray, context: LipsyncAnalysisContext) -> LipsyncFrameResult:
         """Analyze a chunk of PCM audio from one TTS context.
@@ -403,6 +456,8 @@ class FormantLipsyncAnalyzer(BaseLipsyncAnalyzer):
         Returns:
             Keyframes and events measured from the chunk.
         """
+        if self._text_events is not None:
+            self._text_events.prepare(context.text_prior, self._hops * HOP_SECONDS)
         result = LipsyncFrameResult()
         remaining = pcm
         while remaining.size:
@@ -428,6 +483,8 @@ class FormantLipsyncAnalyzer(BaseLipsyncAnalyzer):
             Keyframes and events remaining in the analysis window, with
             ``processed_up_to`` advanced past everything ingested.
         """
+        if self._text_events is not None:
+            self._text_events.prepare(context.text_prior, self._hops * HOP_SECONDS)
         result = LipsyncFrameResult()
         # The wider frames look ``_pad`` samples past the 25 ms frame: pad with
         # zeros so every complete 25 ms frame is still analyzed.
@@ -436,6 +493,7 @@ class FormantLipsyncAnalyzer(BaseLipsyncAnalyzer):
             self._buf_len += self._pad
         self._drain(result)
         self._flush_conditioning(result)
+        self._emit_rest_keyframe(result)
         # Everything ingested is final: tail discarded, pending closures dead.
         result.processed_up_to = self._hops * HOP_SECONDS + EVENT_FINALIZE_HORIZON_SEC
         self._reset_utterance_state()
@@ -472,6 +530,8 @@ class FormantLipsyncAnalyzer(BaseLipsyncAnalyzer):
         self._energy_max = _NOISE_FLOOR_MIN
 
     def _reset_utterance_state(self):
+        if self._text_events is not None:
+            self._text_events.reset()
         # The buffer leads with the widest frame's left context (zeros at the
         # utterance start), so buffer index 0 is that frame's first start.
         self._buf[: self._pad] = 0.0
@@ -693,6 +753,11 @@ class FormantLipsyncAnalyzer(BaseLipsyncAnalyzer):
             _CLOSURE_FLOOR_MULT * self._noise_floor, _CLOSURE_PEAK_FRACTION * self._recent_peak
         )
         murmur_shape = (f1 <= _NASAL_F1_MAX_HZ or f1 == 0.0) and mid_ratio <= _NASAL_MID_RATIO_MAX
+        nasal_hint, phone = None, None
+        if self._text_events is not None:
+            nasal_hint, phone = self._text_events.hint(
+                offset, voiced=voiced, f1=f1, rms=rms, silence_gate=silence_gate
+            )
         event_fired = self._update_events(
             offset,
             rms,
@@ -704,11 +769,13 @@ class FormantLipsyncAnalyzer(BaseLipsyncAnalyzer):
             f2_damped and murmur_shape,
             clarity,
             result,
+            nasal_hint,
         )
         if self._nasal_active:
             openness = min(openness, _NASAL_OPENNESS_MAX)
         elif (
             voiced
+            and nasal_hint is not False
             and f2_damped
             and centroid < _NASAL_SOFT_CAP_CENTROID_HZ
             and low_ratio > _NASAL_SOFT_CAP_RATIO
@@ -716,6 +783,24 @@ class FormantLipsyncAnalyzer(BaseLipsyncAnalyzer):
             # Nasal-ish evidence before the state machine latches: cap the
             # continuous signal so the mouth starts closing within one hop.
             openness = min(openness, _NASAL_SOFT_CAP_OPENNESS)
+
+        if self._text_events is not None:
+            injected = self._text_events.inject_closures(
+                offset, rms, audible=any(self._speech_hist[-_SPEECH_WINDOW_HOPS:])
+            )
+            result.events.extend(injected)
+            event_fired |= bool(injected)
+            if phone == "M" and nasal_hint:
+                openness = min(openness, 0.10)
+            elif phone in ("P", "B") and rms < 0.5 * self._recent_peak:
+                openness = min(openness, 0.10)
+            elif phone in ("UW", "OW", "W") and voiced:
+                rounding = max(rounding, 0.7)
+                width = min(width, 0.25)
+            elif phone in ("F", "V") and rms >= silence_gate:
+                openness = min(openness, 0.25)
+                rounding = 0.0
+                width = max(width, 0.45)
 
         self._prev_targets = [openness, width, rounding]
 
@@ -804,8 +889,9 @@ class FormantLipsyncAnalyzer(BaseLipsyncAnalyzer):
             return value
         self._hold_counts[slot] += 1
         if self._hold_counts[slot] > _HOLD_MAX_HOPS and value > 0.0:
-            center = (prior[0] + prior[1]) / 2.0
-            return value + (center - value) * _HOLD_DECAY
+            drift = _F1_HOLD_DRIFT if slot == 0 else 0.5
+            target = prior[0] + (prior[1] - prior[0]) * drift
+            return value + (target - value) * _HOLD_DECAY
         return value
 
     def _window_frames(self, lpc_raw: np.ndarray, prev_sample: float):
@@ -903,6 +989,7 @@ class FormantLipsyncAnalyzer(BaseLipsyncAnalyzer):
         f2_damped: bool,
         clarity: float,
         result: LipsyncFrameResult,
+        nasal_hint: bool | None = None,
     ) -> bool:
         fired = False
 
@@ -963,6 +1050,10 @@ class FormantLipsyncAnalyzer(BaseLipsyncAnalyzer):
             remaining = []
             for pending in self._pending_closures:
                 if speech:
+                    if self._text_events is not None and not self._text_events.allow_closure(
+                        pending.offset
+                    ):
+                        continue
                     result.events.append(
                         LipsyncEvent(
                             offset=pending.offset,
@@ -983,6 +1074,8 @@ class FormantLipsyncAnalyzer(BaseLipsyncAnalyzer):
             and low_ratio > _NASAL_LOW_RATIO_MIN
             and f2_damped
         )
+        if nasal_hint is not None:
+            nasal_now = nasal_hint
         if nasal_now:
             self._nasal_enter_count += 1
             self._nasal_exit_count = 0
@@ -1069,6 +1162,30 @@ class FormantLipsyncAnalyzer(BaseLipsyncAnalyzer):
             ):
                 self._emit_keyframe(anchor, result)
         self._emit_keyframe(hop, result)
+
+    def _emit_rest_keyframe(self, result: LipsyncFrameResult):
+        """Close the mouth at the end of an utterance (see _UTTERANCE_CLOSE_SEC).
+
+        Only from ``flush()``, the clean end of a TTS context: an interruption
+        goes through ``reset()`` instead, where the client's own cut decides
+        the pose and forcing it shut would fight it.
+        """
+        last = self._last_emitted
+        if last is None:
+            return  # Nothing was emitted; there is no open mouth to close.
+        if max(abs(last[i] - _REST_POSE[i]) for i in range(3)) <= _REST_EPSILON:
+            return  # Already at rest.
+        result.keyframes.append(
+            LipsyncKeyframe(
+                offset=self._hops * HOP_SECONDS + _UTTERANCE_CLOSE_SEC,
+                openness=_REST_POSE[0],
+                width=_REST_POSE[1],
+                rounding=_REST_POSE[2],
+                energy=0.0,
+                pitch=0.0,
+                confidence=0.0,
+            )
+        )
 
     def _emit_keyframe(self, hop: _PendingHop, result: LipsyncFrameResult):
         self._last_emitted = hop.params

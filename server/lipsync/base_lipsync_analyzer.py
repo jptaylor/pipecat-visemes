@@ -21,6 +21,7 @@ from dataclasses import dataclass, field
 
 import numpy as np
 
+from lipsync.text_prior import TextPrior
 from lipsync.types import LipsyncEvent, LipsyncKeyframe
 
 
@@ -35,11 +36,15 @@ class LipsyncAnalysisContext:
             offsets are derived from this counter, never from arrival times,
             so they stay sample-accurate when TTS generates faster than real
             time.
+        text_prior: Optional snapshot of sentence anchors and word timestamps.
+            Text-unaware analyzers can ignore it. Raw clock timestamps are
+            observations, not verified audio/phone alignment.
     """
 
     context_id: str | None
     sample_rate: int
     samples_seen: int = 0
+    text_prior: TextPrior | None = None
 
 
 @dataclass

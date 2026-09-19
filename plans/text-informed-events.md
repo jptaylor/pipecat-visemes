@@ -1,6 +1,19 @@
 # Text-informed events (2026-09-19)
 
-**Status:** planned. Reopens the "Text-informed events" item parked in [README.md](README.md) on the
+**Status (added when this plan was merged, later on 2026-09-19):** stage 0 (§4) landed in commit
+`ce56b2c` before the merge — seven voices in `corpus.yaml` with pitch-based ceilings and a note per
+voice, the pooled seven-voice baseline committed (86.0), per-voice numbers in
+[deep-review-2026-09-results.md](deep-review-2026-09-results.md) (fourth pass), the pause threshold
+at 200 ms, the mama bar restated. The §1 numbers are the first run's; the results note has the
+landed ones (hum NASAL missing on 4 of 6 new voices, one mama take short, four pauses under
+200 ms). At merge, nothing below §4 had started.
+
+
+**Status:** in progress on `codex/text-informed-events`, branched from `main` at `8ea78f0`.
+Stage 1 now implements the optional CMUdict/event path behind `text_events_enabled=False`.
+The first measured review is in [stage-1 results](text-informed-events-stage1-results.md);
+the gains are mixed, so the default remains DSP-only. Reopens the
+"Text-informed events" item parked in [README.md](README.md) on the
 evidence of the seven-voice Cartesia run; supersedes that Parked entry and amends the "Not planned"
 entries it reopens or clarifies (§10).
 **Input:** the seven-voice run of 2026-09-19; [deep-review-2026-09.md](deep-review-2026-09.md) §4.8
@@ -9,6 +22,72 @@ and §8 items 9a, 11, 12; [experiments/l4_proto.py](experiments/l4_proto.py).
 call in the hop loop, analysis lookahead ≤ 3 hops (60 ms; 1 hop is spent today on the zero-phase
 median, `formant_lipsync_analyzer.py:155`), and **text is never required** — every provider still
 works from PCM alone.
+
+## Current branch checkpoint — inputs and comparison
+
+`main` remains the DSP baseline. The branch keeps the same default behavior;
+`LipsyncParams(text_prior_enabled=True)` opts into **observation only**, while
+`LipsyncParams(text_events_enabled=True)` also enables the experimental event layer.
+The processor attaches
+an immutable `TextPrior` to analysis calls, retaining multiple sentence anchors, timed words,
+raw pipeline PTS, and the amount of audio already ingested at each observation. It parks
+pre-start anchors, bounds orphaned/oversized text, and clears it on interruption or disable.
+Stage 1 adds a shared packed English CMUdict, bounded lookup cache, inventory vetoes,
+explicit hum recognition, and word-uniform closure/rounding/labiodental hints where timing
+is available. It adds no audio lookahead. /n, ng/ permit acoustic nasal evidence but do not
+force the lips closed; /m/ and explicit hums can provide a positive closure cue.
+
+Missing text, unknown words, unsupported normalization, contradictory word text, an initial
+anchor more than 60 ms late, or multiple sentence anchors retain/revert to DSP. Shared-context
+sentence alignment is not solved by pretending samples-at-arrival are sentence onsets.
+Priors are capped at 256 words / 2048 phones / 64 characters per word. Wrong-but-plausible text cannot always be detected;
+there is no trained acoustic alignment-cost gate in stage 1. Already emitted output is never
+revised. A pending DSP closure more than 60 ms behind newly available word timing
+is protected from a retrospective timing-based veto.
+
+Two measurement gaps in §8 are closed: the recorder now captures/replays sentence anchors
+(including early, late and untimestamped ones), and the accuracy driver can supply untimed
+corpus text. Accuracy JSON carries exact output hashes, and both tools record a runtime source
+hash and text mode. Comparisons reject incompatible corpus/reference settings. The committed
+DSP baselines are preserved; experimental runs use `--tag`.
+
+From `server/`, on this branch:
+
+```bash
+# Repeat for both providers; Cartesia includes all seven configured voices.
+uv run python -m benchmarks.accuracy --offline --provider cartesia --tag dsp-cartesia --compare
+uv run python -m benchmarks.accuracy --offline --provider cartesia --text-prior --tag text-cartesia --compare benchmarks/results/accuracy-dsp-cartesia.json
+uv run python -m benchmarks.accuracy --offline --provider deepgram --tag dsp-deepgram --compare
+uv run python -m benchmarks.accuracy --offline --provider deepgram --text-prior --tag text-deepgram --compare benchmarks/results/accuracy-dsp-deepgram.json
+
+# Retained audio; choose these runs in the client's Eval tab.
+uv run python -m benchmarks.record --reanalyze --tag dsp
+uv run python -m benchmarks.record --reanalyze --text-prior --tag text-observe
+
+# Actual event experiment; fresh fixtures capture text availability without
+# overwriting the old audio. First invocation needs the provider API key.
+uv run python -m benchmarks.accuracy --fixtures benchmarks/fixtures/text-events --tag stage1-dsp
+uv run python -m benchmarks.accuracy --offline --fixtures benchmarks/fixtures/text-events --text-events --tag stage1-events --compare benchmarks/results/accuracy-stage1-dsp.json
+uv run python -m benchmarks.record --reanalyze --text-events --assume-early-text --tag stage1-events
+```
+
+For **old recordings only**, `--assume-early-text` explicitly supplies an untimestamped anchor
+from the example text when the recording never captured anchors. The run label and metadata
+identify the affected examples. It does not fill an explicitly recorded absence of text and
+does not invent word timing. A new recording captures anchors automatically, whether or not
+text observation is enabled. Accuracy's `--text-prior` similarly provides no word timing and
+must not be interpreted as a streaming alignment benchmark.
+
+The word clock is estimated from first audio receipt and the previous context's final word
+PTS, not the sentence anchor or queued playout time (see §2.2). New accuracy fixtures retain
+word PTS relative to first audio and the source samples ingested at arrival; the mirror
+reveals them at that point on its 20 ms ingest grid. No future words are supplied early.
+Deepgram's tested service supplies no timed words, so it uses inventory/hum priors only.
+
+Next work is conditional on [the stage-1 review](text-informed-events-stage1-results.md):
+independent onset labels and visual A/B review, then decide whether a bounded aligner is
+worth its cost. Stage 2 / a learned scorer have not been started. The input-only historical
+checkpoint is [text-informed-events-results.md](text-informed-events-results.md).
 
 ---
 
@@ -83,15 +162,17 @@ pessimistically wrong:
    as the sentence anchor. Discriminate on `aggregated_by` (`AggregationType.SENTENCE` vs `WORD`)
    or on `not isinstance(frame, TTSTextFrame)`. This is the first bug anyone writing this will
    ship.
-2. **The clock problem is smaller than §4.8 states.** The review says the TTS word baseline
-   (`_initial_word_timestamp`) and our `t0` are "different clocks-of-record". They are the same
-   pipeline clock sampled at two instants, both under a continuity rule
-   (`max(_word_last_pts, get_clock().get_time())` at `:1385–1390` vs
-   `max(now, self._last_playout_end)` at `lipsync_processor.py:360–364`). Better still: on the
-   word-timestamp path the **anchor frame itself is stamped with that same baseline**
-   (`:962–967`). So the offset between the word clock and our `t0` is *directly observable* from
-   the anchor's `pts`, not something to estimate. Use it, and keep the `samples_seen`-at-anchor
-   fallback for queued contexts.
+2. **Shared clock, but not necessarily a shared baseline (corrected during implementation).**
+   Both use the pipeline clock, with continuity rules based on `_word_last_pts` and
+   `_last_playout_end` respectively. However, `TTSService.push_frame` stamps a sentence anchor
+   before synthesis (`tts_service.py:962–967`), while `_handle_audio_context` calls
+   `start_word_timestamps()` on the **first audio chunk** (`:1737–1743`, installed 1.10.0).
+   Its `max(_word_last_pts, now)` can therefore be later than the anchor's by the synthesis
+   wait. The original claim that the anchor directly reveals the word baseline was too strong.
+   Preserve raw anchor/word PTS, the processor's playout origin, and samples-at-observation;
+   validate the mapping before deriving phone windows. Queued contexts and TOKEN-mode late
+   anchors need their own timing tests. The first checkpoint does not pretend these raw
+   observations are aligned phone onsets.
 3. **The anchor's text is the pre-transformation text.** TTS-specific transformations (spelling
    tags, emotion tags, `@` → "at") are applied after the anchor is pushed (`:1245–1250`), so the
    audio may be of a different string than the one we look up. G2P on the anchor text is a prior,
@@ -108,8 +189,9 @@ The existing separation holds and should not be disturbed: **the processor owns 
 and batching; analyzers only measure** (`base_lipsync_analyzer.py:9–13`). Text is an input to
 measurement, so:
 
-- `process_frame` taps the sentence anchor and the word frames, converts word `pts` to context
-  seconds against the observed baseline, and parks a small immutable record per context.
+- `process_frame` taps the sentence anchor and the word frames and parks a bounded record per
+  context. Snapshots are made on the analysis task. Once a word-clock mapping is validated
+  (§2.2), convert word `pts` to context seconds; do not assume the anchor is that baseline.
 - `LipsyncAnalysisContext` gains one optional field (a `TextPrior | None`) — it is already the
   per-context carrier the analyzer receives on every `analyze()` call, so no interface method is
   added and a text-unaware analyzer keeps working unchanged.
@@ -123,8 +205,10 @@ measurement, so:
 **Invariants, to be asserted by tests, not by intent:**
 
 - No text → byte-identical output to today. This is the regression gate on every stage.
-- Text present but wrong (mispronounced, transformed, misaligned) → the alignment-cost gate falls
-  back to DSP for that sentence; never worse than DSP-only.
+- Text present but observably inconsistent → fall back to DSP. **Correction:** a guarantee of
+  "never worse" for arbitrary wrong-but-plausible text is not enforceable by a lexicon or
+  lightweight acoustic gate. Stage 1 rejects identifiable failures and reports regressions;
+  a stronger alignment gate is stage-2 work, not an implemented safety guarantee.
 - Nothing on the frame path blocks or allocates per word beyond O(words in sentence).
 - Lookahead stays ≤ 3 hops total, including the 1 hop already spent on conditioning.
 
@@ -250,7 +334,8 @@ Honest gates, in order of preference:
    its bars. This is the seven-voice failure restated as a pass/fail, and text cannot fake it: a
    wrong lexicon injects wrong counts.
 2. **Negative controls.** Sentences with no /p b m/ must produce no closures; a nasal-free sentence
-   must not latch the override. Cheap to add to the corpus, impossible to satisfy by construction.
+   must not latch the override. These expose false positives on real audio but an inventory
+   veto can satisfy them by construction; they do not establish onset precision or recall.
 3. **Openness inside expected bilabial spans.** A shape measure on the DSP output, not a
    detector-scoring-itself measure — the proxy read 0.42 → 0.28 when aligned spans force closure.
 4. **Hand-labelled onsets on a small held-out subset** (one or two sentences × 7 voices) for the one
@@ -259,9 +344,10 @@ Honest gates, in order of preference:
 5. **Timing, separately.** `benchmarks.record` already captures word `pts` and — verified —
    **replays them** (`record.py:440–443` reconstructs `TTSTextFrame`s with `pts` on the replay
    clock), so `--reanalyze` is already a text-tier rig over retained audio with no TTS calls. Two
-   gaps to close: the replay emits no `AggregatedTextFrame` sentence anchor, and `accuracy.py`
-   drives the analyzer through the ingest mirror rather than the processor, so it has no text path
-   at all — though it holds `Sentence.text` already.
+   gaps identified here are addressed by the input checkpoint above: replay now preserves
+   recorded `AggregatedTextFrame` sentence anchors, and `accuracy.py` can attach `Sentence.text`
+   as an untimed prior. The old fixtures still lack streaming text arrival/timing evidence;
+   the recorder, rather than invented timings in the ingest mirror, is the timing rig.
 
 Every stage is gated by `uv run python -m benchmarks.accuracy --offline --compare` on **both**
 providers and **all 7 voices**, plus `benchmarks.record --reanalyze` before/after for anything that
