@@ -12,10 +12,11 @@ Run: uv run python -m benchmarks.accuracy [--offline] [--compare]
 
 import argparse
 import asyncio
+import hashlib
 import json
 import os
 import sys
-from dataclasses import dataclass, field
+from dataclasses import asdict, dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
 
@@ -31,12 +32,14 @@ from benchmarks.common import (
     apply_overrides,
     chunks_16k_float32,
     get_clip,
+    lipsync_digest,
     load_corpus,
     src_sha,
     teardowns_pending,
 )
 from lipsync.base_lipsync_analyzer import LipsyncAnalysisContext
 from lipsync.formant_lipsync_analyzer import FormantLipsyncAnalyzer
+from lipsync.text_prior import TextAnchor, TextPrior
 from lipsync.types import LipsyncEventKind
 
 BASELINE_PATH = RESULTS_DIR / "baseline.json"
@@ -102,6 +105,7 @@ class ClipResult:
     take: int
     metrics: dict[str, float]
     checks: dict[str, bool] = field(default_factory=dict)
+    output_sha256: str = ""
 
 
 #
@@ -140,7 +144,13 @@ def compute_reference(clip: Clip, offsets: np.ndarray, ceiling: float) -> Refere
 #
 
 
-async def analyze_clip(clip: Clip, warm_pcm: bytes | None = None, warm_rate: int = 0):
+async def analyze_clip(
+    clip: Clip,
+    warm_pcm: bytes | None = None,
+    warm_rate: int = 0,
+    *,
+    text_prior: bool = False,
+):
     analyzer = FormantLipsyncAnalyzer(collect_debug=True)
     await analyzer.start(clip.sample_rate)
 
@@ -152,6 +162,11 @@ async def analyze_clip(clip: Clip, warm_pcm: bytes | None = None, warm_rate: int
     warm_frames = len(analyzer.debug_features)
 
     context = LipsyncAnalysisContext(context_id="bench", sample_rate=clip.sample_rate)
+    if text_prior:
+        # Fixtures retain text but no word/anchor arrival timeline. Supplying
+        # this untimed anchor exercises the input contract, not streaming
+        # alignment. Do not fabricate word timing from the clip's duration.
+        context.text_prior = TextPrior(anchors=(TextAnchor(clip.sentence.text),))
     keyframes, events = [], []
     async for chunk in chunks_16k_float32(clip.pcm, clip.sample_rate):
         result = await analyzer.analyze(chunk, context)
@@ -161,6 +176,13 @@ async def analyze_clip(clip: Clip, warm_pcm: bytes | None = None, warm_rate: int
     keyframes += result.keyframes
     events += result.events
     return keyframes, events, analyzer.debug_features[warm_frames:]
+
+
+def output_digest(keyframes, events) -> str:
+    """Hash full-precision analysis output, before wire rounding/batching."""
+    payload = {"keyframes": [asdict(k) for k in keyframes], "events": [asdict(e) for e in events]}
+    encoded = json.dumps(payload, sort_keys=True, separators=(",", ":"), allow_nan=False)
+    return hashlib.sha256(encoded.encode()).hexdigest()
 
 
 #
@@ -474,8 +496,15 @@ def report(results: list[ClipResult], run_meta: dict, baseline: dict | None):
         f"\nACCURACY  {run_meta['provider']} · {len(set(r.voice_id for r in results))} voice(s) · "
         f"{len(set(r.sentence_id for r in results))} sentences · {run_meta['takes']} take(s)"
         f"{' · warm' if run_meta['warm'] else ''}"
+        f"{' · text prior: untimed corpus (observe)' if run_meta.get('text_prior') else ' · text: off'}"
         f"\ncomposite {composite:.1f}{base_line}\n"
     )
+    if baseline:
+        before = {c["label"]: c.get("output_sha256") for c in baseline["clips"]}
+        matched = [r for r in results if r.output_sha256 and before.get(r.clip_label)]
+        if matched:
+            identical = sum(r.output_sha256 == before[r.clip_label] for r in matched)
+            print(f"identical analysis outputs: {identical}/{len(matched)} matched clips\n")
 
     rows = []
     metric_names = [
@@ -625,7 +654,9 @@ async def run(args) -> dict:
                 clip = await get_clip(
                     sentence, voice, take, offline=args.offline, refresh=args.refresh
                 )
-                keyframes, events, debug = await analyze_clip(clip, warm_pcm, warm_rate)
+                keyframes, events, debug = await analyze_clip(
+                    clip, warm_pcm, warm_rate, text_prior=args.text_prior
+                )
                 if not debug:
                     print(f"  ! no analysis frames for {clip.label}; skipping")
                     continue
@@ -640,6 +671,7 @@ async def run(args) -> dict:
                         take=take,
                         metrics=metrics,
                         checks=run_checks(sentence, metrics),
+                        output_sha256=output_digest(keyframes, events),
                     )
                 )
 
@@ -654,6 +686,7 @@ async def run(args) -> dict:
         "run": {
             "timestamp": datetime.now(UTC).isoformat(),
             "src_sha": src_sha(),
+            "lipsync_sha256": lipsync_digest(),
             "provider": args.provider,
             "voices": [v.id for v in voices],
             "takes": args.takes,
@@ -661,6 +694,8 @@ async def run(args) -> dict:
             "sentences": [s.id for s in sentences],
             "overrides": getattr(args, "overrides", {}),
             "ceiling_override": args.ceiling,
+            "text_prior": args.text_prior,
+            "text_source": "untimed-corpus" if args.text_prior else "none",
         },
         "composite": composite,
         "component_scores": comp_scores,
@@ -673,6 +708,7 @@ async def run(args) -> dict:
                 "take": r.take,
                 "metrics": {k: (v if np.isfinite(v) else None) for k, v in r.metrics.items()},
                 "checks": r.checks,
+                "output_sha256": r.output_sha256,
             }
             for r in results
         ],
@@ -682,6 +718,24 @@ async def run(args) -> dict:
 # Corpus bars = ORACLE_DISCOUNT x the Praat-oracle value (min over takes) —
 # one global constant, applied uniformly; never fitted per check.
 ORACLE_DISCOUNT = 0.8
+
+
+def validate_comparison(run: dict, baseline: dict):
+    """A/B deltas must describe the same clips and reference configuration.
+
+    Analyzer overrides and text modes may differ deliberately. A different
+    provider, subset or Praat ceiling must not silently read as improvement.
+    """
+    other = baseline["run"]
+    mismatches = []
+    for key in ("provider", "voices", "sentences", "takes", "warm", "ceiling_override"):
+        a, b = run.get(key), other.get(key)
+        if key in ("voices", "sentences"):
+            a, b = sorted(a or []), sorted(b or [])
+        if a != b:
+            mismatches.append(key)
+    if mismatches:
+        raise ValueError("incompatible comparison: " + ", ".join(mismatches))
 
 
 async def calibrate(args):
@@ -725,6 +779,11 @@ def main():
     parser.add_argument("--warm", action="store_true", help="pre-converge analyzer per voice")
     parser.add_argument("--save-baseline", action="store_true")
     parser.add_argument(
+        "--text-prior",
+        action="store_true",
+        help="supply untimed corpus text to analysis (experimental; currently observation only)",
+    )
+    parser.add_argument(
         "--compare",
         nargs="?",
         const="",
@@ -751,6 +810,10 @@ def main():
         help="print Praat-oracle p90 stats per clip (for setting corpus bars) and exit",
     )
     args = parser.parse_args()
+    if args.save_baseline and args.text_prior:
+        parser.error(
+            "use --tag for text experiments; --save-baseline is reserved for DSP-only runs"
+        )
 
     logger.remove()
     logger.add(sys.stderr, level="WARNING")
@@ -773,6 +836,10 @@ def main():
         compare_path = Path(args.compare) if args.compare else baseline_path(args.provider)
         if compare_path.exists():
             baseline = json.loads(compare_path.read_text())
+            try:
+                validate_comparison(payload["run"], baseline)
+            except ValueError as e:
+                parser.error(str(e))
         else:
             print(f"no baseline at {compare_path}; reporting without comparison")
 

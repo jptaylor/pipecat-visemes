@@ -19,7 +19,7 @@ Per example the recording keeps:
 - every lipsync server-message with its release time and the time it was due
   (its batch's scheduled release), in seconds from the first played sample,
 - word timings (TTSTextFrame release times) when the TTS has word timestamps,
-- the TTS output timeline (audio chunks, and word-timestamp frames, which
+- the TTS output timeline (sentence anchors, audio chunks, and word-timestamp frames, which
   go through the transport's clock queue like they do live), so
   ``--reanalyze`` can replay the retained audio through the current lipsync
   code (no TTS calls) with the same timing.
@@ -38,6 +38,12 @@ Run (from server/):
     uv run python -m benchmarks.record --reanalyze         # new run over the newest recording
     uv run python -m benchmarks.record --reanalyze --set dsp.LPC_ORDER=14 --tag order14
     uv run python -m benchmarks.record --provider deepgram
+    uv run python -m benchmarks.record --reanalyze --text-prior --tag text-observe
+
+Text priors currently collect observations only; the formant analyzer remains
+DSP-only. Old recordings without anchors can explicitly opt into
+``--assume-early-text``; the run records that assumption. Recordings with an
+empty anchors list preserve the observed absence of text.
 """
 
 import argparse
@@ -56,6 +62,7 @@ import yaml
 from loguru import logger
 from pipecat.clocks.base_clock import BaseClock
 from pipecat.frames.frames import (
+    AggregatedTextFrame,
     EndFrame,
     Frame,
     OutputAudioRawFrame,
@@ -79,6 +86,7 @@ import lipsync
 from benchmarks.common import (
     BENCH_DIR,
     apply_overrides,
+    lipsync_digest,
     load_corpus,
     make_tts,
     read_wav,
@@ -154,6 +162,8 @@ class _Capture:
     tts_sample_rate: int = 0
     # (arrived, pts, text) of each word-timestamp frame from the TTS.
     word_arrivals: list[tuple[int, int, str]] = field(default_factory=list)
+    # (arrived, pts or None, text); anchors can precede TTSStartedFrame.
+    anchor_arrivals: list[tuple[int, int | None, str]] = field(default_factory=list)
     # (play start, play end, bytes) for every write to the simulated device.
     played: list[tuple[int, int, bytes]] = field(default_factory=list)
     # [released, due, data]: due is the batch's scheduled release (already
@@ -189,7 +199,17 @@ class _Recorder:
         capture = self.current
         if capture is None:
             return
-        if isinstance(frame, TTSStartedFrame):
+        if (
+            isinstance(frame, AggregatedTextFrame)
+            and not isinstance(frame, TTSTextFrame)
+            and frame.will_be_spoken
+            and frame.aggregated_by == "sentence"
+        ):
+            if capture.ctx is None:
+                capture.ctx = frame.context_id
+            if frame.context_id == capture.ctx:
+                capture.anchor_arrivals.append((now, frame.pts, frame.text))
+        elif isinstance(frame, TTSStartedFrame):
             if capture.ctx is None:
                 capture.ctx = frame.context_id
             if frame.context_id == capture.ctx and capture.started_ns is None:
@@ -197,7 +217,12 @@ class _Recorder:
         elif isinstance(frame, TTSAudioRawFrame) and frame.context_id == capture.ctx:
             capture.arrivals.append((now, frame.audio))
             capture.tts_sample_rate = frame.sample_rate
-        elif isinstance(frame, TTSTextFrame) and frame.context_id == capture.ctx and frame.pts:
+        elif (
+            isinstance(frame, TTSTextFrame)
+            and frame.context_id == capture.ctx
+            and frame.aggregated_by == "word"
+            and frame.pts is not None
+        ):
             capture.word_arrivals.append((now, frame.pts, frame.text))
         elif isinstance(frame, TTSStoppedFrame) and frame.context_id == capture.ctx:
             capture.stopped_ns = now
@@ -232,7 +257,7 @@ class _Recorder:
                 else:
                     capture.unpaired_messages.append(message)
         elif isinstance(frame, TTSTextFrame) and frame.context_id == capture.ctx:
-            capture.words.append((now, frame.text, bool(frame.pts)))
+            capture.words.append((now, frame.text, frame.pts is not None))
         elif isinstance(frame, TTSStoppedFrame) and frame.context_id == capture.ctx:
             # The transport forwards TTSStoppedFrame once all preceding audio
             # has been written, i.e. once the example has played out.
@@ -367,6 +392,12 @@ def _finish(capture: _Capture, sample_rate: int, stats: dict[str, int]) -> _Take
             "ctx": capture.ctx,
             "sample_rate": capture.tts_sample_rate,
             "chunks": [[since_started(ns), len(audio)] for ns, audio in capture.arrivals],
+            # Presence matters: [] means observed NO anchors; older files
+            # without this key did not record them at all.
+            "anchors": [
+                [since_started(ns), since_started(pts) if pts is not None else None, text]
+                for ns, pts, text in capture.anchor_arrivals
+            ],
             "words": [
                 [since_started(ns), since_started(pts), text]
                 for ns, pts, text in capture.word_arrivals
@@ -417,19 +448,30 @@ def _summary(take: _Take) -> str:
 #
 
 
-async def _replay(worker: PipelineWorker, clock: BaseClock, arrival: dict, pcm: bytes):
-    """Re-inject a recorded take's TTS frames on their original timeline.
+def _replay_frames(
+    arrival: dict, pcm: bytes, base_ns: int, *, assumed_text: str | None = None
+) -> list[tuple[float, Frame]]:
+    """Restore text, audio and lifecycle frames without inventing word timing.
 
-    Word-timestamp frames are replayed too (with their pts shifted onto this
-    run's clock): they share the output transport's clock queue with the
-    lipsync batches, so they shape when batches are released.
+    ``assumed_text`` is an explicit legacy-recording experiment. It inserts
+    an untimestamped anchor at context start only when anchors were never
+    recorded, not when a recording observed none (TOKEN/no-text providers).
     """
     ctx = arrival["ctx"]
     sample_rate = arrival["sample_rate"]
-    loop = asyncio.get_running_loop()
-    base, base_ns = loop.time(), clock.get_time()
-
     frames: list[tuple[float, Frame]] = []
+    anchors = arrival.get("anchors", [])
+    if "anchors" not in arrival and assumed_text:
+        anchors = [[0.0, None, assumed_text]]
+    for t, pts, text in anchors:
+        anchor = AggregatedTextFrame(text, aggregated_by="sentence", context_id=ctx)
+        anchor.will_be_spoken = True
+        anchor.append_to_context = False
+        anchor.pts = base_ns + seconds_to_nanoseconds(pts) if pts is not None else None
+        frames.append((t, anchor))
+    # An anchor rounded to t=0 still precedes start (stable sort). Late
+    # TOKEN-mode anchors retain their position after the relevant audio.
+    frames.append((0.0, TTSStartedFrame(context_id=ctx)))
     offset = 0
     for t, size in arrival["chunks"]:
         audio = pcm[offset : offset + size]
@@ -441,10 +483,30 @@ async def _replay(worker: PipelineWorker, clock: BaseClock, arrival: dict, pcm: 
         word = TTSTextFrame(text, aggregated_by="word", context_id=ctx)
         word.pts = base_ns + seconds_to_nanoseconds(pts)
         frames.append((t, word))
-    frames.sort(key=lambda item: item[0])
     frames.append((arrival["stopped"], TTSStoppedFrame(context_id=ctx)))
+    frames.sort(key=lambda item: item[0])
+    return frames
 
-    await worker.queue_frames([TTSStartedFrame(context_id=ctx)])
+
+async def _replay(
+    worker: PipelineWorker,
+    clock: BaseClock,
+    arrival: dict,
+    pcm: bytes,
+    *,
+    assumed_text: str | None = None,
+):
+    """Replay the retained arrival timeline, including pre-start/late anchors.
+
+    Shift all PTS by the same clock origin. Never use sentence PTS as the
+    word-clock origin: those baselines need not be the same.
+    """
+    loop = asyncio.get_running_loop()
+    first = min([0.0] + [a[0] for a in arrival.get("anchors", [])])
+    base = loop.time() - first
+    base_ns = clock.get_time() - seconds_to_nanoseconds(first)
+    frames = _replay_frames(arrival, pcm, base_ns, assumed_text=assumed_text)
+
     for t, frame in frames:
         delay = base + t - loop.time()
         if delay > 0:
@@ -459,17 +521,18 @@ class _Source:
     tts: FrameProcessor | None = None
     arrivals: dict[str, dict] = field(default_factory=dict)
     pcm: dict[str, bytes] = field(default_factory=dict)
+    assume_early_text: bool = False
 
 
 async def _run_examples(
-    examples: list[Example], source: _Source, sample_rate: int
+    examples: list[Example], source: _Source, sample_rate: int, *, text_prior: bool = False
 ) -> tuple[list[_Take], bool]:
     """Speak every example through one pipeline session.
 
     Returns the takes and whether the pipeline shut down cleanly.
     """
     recorder = _Recorder()
-    lipsync_processor = LipsyncProcessor()
+    lipsync_processor = LipsyncProcessor(params=LipsyncParams(text_prior_enabled=text_prior))
     transport = _PlayoutTransport(recorder.on_played)
     processors = [
         _Tap(recorder.on_input),
@@ -501,9 +564,21 @@ async def _run_examples(
             feeder = None
             if arrival is not None:
                 feeder = asyncio.create_task(
-                    _replay(worker, transport.get_clock(), arrival, source.pcm[example.id])
+                    _replay(
+                        worker,
+                        transport.get_clock(),
+                        arrival,
+                        source.pcm[example.id],
+                        assumed_text=example.text if source.assume_early_text else None,
+                    )
                 )
-                timeout = arrival["stopped"] + len(source.pcm[example.id]) / 2 / sample_rate + 15
+                prestart = -min([0.0] + [a[0] for a in arrival.get("anchors", [])])
+                timeout = (
+                    prestart
+                    + arrival["stopped"]
+                    + len(source.pcm[example.id]) / 2 / sample_rate
+                    + 15
+                )
             else:
                 await worker.queue_frames([TTSSpeakFrame(example.text)])
                 timeout = _LIVE_TIMEOUT_SECS
@@ -611,10 +686,20 @@ def _find_recording(out_dir: Path, which: str) -> Path:
     return out_dir / newest["id"]
 
 
-def _run_payload(run_id: str, mode: str, takes: list[_Take], overrides: dict) -> dict:
+def _run_payload(
+    run_id: str,
+    mode: str,
+    takes: list[_Take],
+    overrides: dict,
+    *,
+    text_prior: bool = False,
+    assumed_text_examples: list[str] | None = None,
+) -> dict:
     sha, dirty = src_sha(), _lipsync_dirty()
     label = " · ".join(
-        [run_id, sha + ("+dirty" if dirty else "")] + [f"{k}={v}" for k, v in overrides.items()]
+        [run_id, sha + ("+dirty" if dirty else ""), "text: observe" if text_prior else "text: off"]
+        + (["assumed early text"] if assumed_text_examples else [])
+        + [f"{k}={v}" for k, v in overrides.items()]
     )
     return {
         "version": FORMAT_VERSION,
@@ -623,6 +708,9 @@ def _run_payload(run_id: str, mode: str, takes: list[_Take], overrides: dict) ->
         "mode": mode,
         "created_at": datetime.now(UTC).isoformat(timespec="seconds"),
         "git": {"sha": sha, "dirty": dirty},
+        "lipsync_sha256": lipsync_digest(),
+        "text_prior": text_prior,
+        "assumed_text_examples": assumed_text_examples or [],
         "overrides": overrides,
         "examples": {
             take.example.id: {"messages": take.messages, "stats": take.stats} for take in takes
@@ -666,7 +754,10 @@ async def record_new(args, overrides: dict) -> bool:
     sample_rate = PipelineParams().audio_out_sample_rate
     print(f"recording {len(examples)} examples: {args.provider} voice {voice}")
     takes, clean = await _run_examples(
-        examples, _Source(tts=make_tts(args.provider, voice)), sample_rate
+        examples,
+        _Source(tts=make_tts(args.provider, voice)),
+        sample_rate,
+        text_prior=args.text_prior,
     )
     if not takes:
         raise SystemExit("nothing recorded")
@@ -685,7 +776,7 @@ async def record_new(args, overrides: dict) -> bool:
         },
         compact=True,
     )
-    run = _run_payload(args.tag or "live", "live", takes, overrides)
+    run = _run_payload(args.tag or "live", "live", takes, overrides, text_prior=args.text_prior)
     _write_json(rec_dir / "runs" / f"{run['id']}.json", run, compact=True)
     _write_json(
         rec_dir / "recording.json",
@@ -734,7 +825,12 @@ async def reanalyze(args, overrides: dict) -> bool:
     if any(r["id"] == run_id and r["mode"] == "live" for r in recording["runs"]):
         raise SystemExit(f"--tag {run_id} would overwrite the recording's live run")
     sample_rate = recording["sample_rate"]
-    source = _Source(arrivals=arrivals)
+    source = _Source(arrivals=arrivals, assume_early_text=args.assume_early_text)
+    assumed = [
+        e.id
+        for e in examples
+        if args.assume_early_text and "anchors" not in arrivals[e.id] and e.text
+    ]
     for entry in recording["examples"]:
         if any(e.id == entry["id"] for e in examples):
             played, _ = read_wav(rec_dir / entry["audio"])
@@ -743,11 +839,20 @@ async def reanalyze(args, overrides: dict) -> bool:
             source.pcm[entry["id"]] = _strip_gaps(played, arrival["gaps"], size)
 
     print(f"reanalyzing {len(examples)} examples of {recording['id']}")
-    takes, clean = await _run_examples(examples, source, sample_rate)
+    if assumed:
+        print(f"  assuming an early, untimestamped sentence anchor for {len(assumed)} legacy takes")
+    takes, clean = await _run_examples(examples, source, sample_rate, text_prior=args.text_prior)
     if not takes:
         raise SystemExit("nothing analyzed")
 
-    run = _run_payload(run_id, "reanalyze", takes, overrides)
+    run = _run_payload(
+        run_id,
+        "reanalyze",
+        takes,
+        overrides,
+        text_prior=args.text_prior,
+        assumed_text_examples=assumed,
+    )
     _write_json(rec_dir / "runs" / f"{run_id}.json", run, compact=True)
     recording["runs"] = [r for r in recording["runs"] if r["id"] != run_id] + [_run_summary(run)]
     _write_json(rec_dir / "recording.json", recording)
@@ -780,9 +885,22 @@ def main():
     )
     parser.add_argument("--tag", help="run name (default: live, or reanalyze-<timestamp>)")
     parser.add_argument(
+        "--text-prior",
+        action="store_true",
+        help="attach text observations to analyzer contexts (experimental; currently observation only)",
+    )
+    parser.add_argument(
+        "--assume-early-text",
+        action="store_true",
+        help="replay only: supply an untimestamped sentence anchor from corpus text for legacy "
+        "takes that did not record anchors; marks the run as an assumption",
+    )
+    parser.add_argument(
         "--out", type=Path, default=EVAL_DIR, help=f"output directory (default: {EVAL_DIR})"
     )
     args = parser.parse_args()
+    if args.assume_early_text and not args.reanalyze:
+        parser.error("--assume-early-text requires --reanalyze")
 
     logger.remove()
     logger.add(sys.stderr, level="WARNING")

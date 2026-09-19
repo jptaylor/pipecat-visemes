@@ -7,6 +7,7 @@ plans/benchmark-harness-accuracy.md.
 
 import ast
 import asyncio
+import hashlib
 import json
 import os
 import subprocess
@@ -320,6 +321,20 @@ def src_sha() -> str:
         return sha or "unknown"
     except Exception:
         return "unknown"
+
+
+def lipsync_digest() -> str:
+    """Fingerprint runtime sources, including uncommitted/untracked Python files.
+
+    Git HEAD alone cannot distinguish two experiments in the same worktree.
+    Hash names as well as content, in a stable order, ignoring bytecode.
+    """
+    root = Path(dsp.__file__).parent
+    digest = hashlib.sha256()
+    for path in sorted(root.rglob("*.py")):
+        digest.update(path.relative_to(root).as_posix().encode() + b"\0")
+        digest.update(path.read_bytes() + b"\0")
+    return digest.hexdigest()
 
 
 #

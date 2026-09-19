@@ -165,6 +165,10 @@ are measured with the eval recorder (`--reanalyze` on the same audio) before and
    two failures that were DSP work and not the text tier's to claim (the pause threshold, now
    200 ms; male-voice F2, a Praat-ceiling matter): what remains for text is the nasal label on
    bright/breathy voices and the /m/ closures on deep ones, items 2 and 5.
+   Work has started on `codex/text-informed-events`, with optional text-input plumbing and
+   exact-output A/B checks; event decisions still use the DSP analyzer. The input checkpoint
+   and a correction to the sentence/word clock assumption are documented in the plan and
+   [its results note](text-informed-events-results.md).
 2. **The nasal detector across voices.** Its murmur evidence is "dark spectrum + damped F2",
    which holds on three of seven Cartesia voices and the Deepgram voice; on the other four the
    hum is as bright as their vowels and NASAL never fires (the mouth still closes on most of them

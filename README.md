@@ -107,7 +107,7 @@ npm --prefix client run dev   # viseme client on http://localhost:5173
 ## Tests
 
 ```bash
-cd server && uv run pytest    # 55 tests; ruff check . / ruff format . for lint
+cd server && uv run pytest    # ruff check . / ruff format . for lint
 ```
 
 ## Accuracy benchmark
@@ -128,6 +128,15 @@ checkout once the fixtures exist; fixtures themselves are not committed. While t
 `--set dsp.LPC_ORDER=14` overrides any `dsp`/`analyzer` constant for one run and `--tag`
 names the results file; `plans/experiments/ab_table.py` runs whole A/B ladders.
 
+Text-informed work is isolated on `codex/text-informed-events`; `main` at `8ea78f0`
+is the original comparison point. The branch's first checkpoint adds optional text
+observations and A/B provenance, with the existing DSP analyzer and default behavior.
+`--text-prior` supplies untimed corpus text to the accuracy driver (observation only for
+now); results include full-precision output hashes for exact regression comparisons.
+Use `--tag` for experiments and `--compare <results.json>` for matching runs. Commands,
+status and the remaining event work are in
+[the text-informed plan](plans/text-informed-events.md#current-branch-checkpoint--inputs-and-comparison).
+
 ## Eval tab
 
 The client's **Eval** tab plays a fixed corpus of clips (`server/benchmarks/eval_corpus.yaml`:
@@ -145,9 +154,14 @@ Recording speaks each example in the bot's voice through the bot's output path (
 `LipsyncProcessor` → output transport → `LipsyncMessageRelay`), in real time, with a headless
 transport paced like SmallWebRTC's. It keeps the audio as played, every lipsync server-message
 with its release and due times, word timings, and the TTS arrival timeline, which
-`--reanalyze` replays (audio and word-timestamp frames) without calling the TTS, adding a run
+`--reanalyze` replays (audio, sentence anchors and word-timestamp frames) without calling the TTS, adding a run
 to the newest recording so changes compare on identical audio. Files land in
 `client/public/eval/` (gitignored), served as-is by the Vite dev server.
+
+On the text-informed branch, `--text-prior` enables observation of those frames by the
+processor. Old recordings did not capture sentence anchors: `--assume-early-text` explicitly
+supplies one from each example's text for those takes and marks the assumption in the run.
+New recordings preserve the real anchor arrivals automatically, including late or absent text.
 
 In the tab, **as delivered** hands each batch to the stock feed at its recorded release time,
 so it anchors exactly as a connected client would (minus network); **ideal** puts every batch
