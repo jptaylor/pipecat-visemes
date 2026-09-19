@@ -1,7 +1,7 @@
 # Benchmark Harness — Performance
 
-**Status:** Ready for implementation (after implementation plan M1–M4)
-**Location:** Root project (`benchmarks/`), never upstream.
+**Status:** Not built; superseded (2026-09-19). What it was designed to measure is covered elsewhere: CPU cost is reported by the accuracy harness as µs per 20 ms hop and RTF (~185 µs, RTF ≈ 0.009, about 1 % of one core per speaking bot); delivery timing — release time against playout, first-batch lag, clock-queue holds, the `pts_clamped`/`bytes_dropped`/`playout_gaps` counters — is recorded by the eval recorder (`server/benchmarks/record.py`), which drives a real `BaseOutputTransport` with a real-time simulated audio device (the §4.2 idea, with honest pacing). Not measured anywhere: RSS per session and the `--sessions` leak fit; the differential-CPU design in §4.5 is the way to do that if it is ever needed. The text below also predates the standalone layout — `RTVIObserverParams(bot_lipsync_enabled=True)` and a `CapturingRTVIObserver` do not exist; the relay path is the design of record — and is kept as the design record only. See [README.md](README.md).
+**Location:** would have been `server/benchmarks/performance.py`.
 **Goal:** Measure the server-side path **TTS audio → `bot-tts-lipsync` RTVI message** —
 latency at each stage, delivery-timing correctness, and CPU/RSS cost — so we know whether
 the implementation is performing as designed and where it isn't. No client, no network:

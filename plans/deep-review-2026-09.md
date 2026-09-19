@@ -1,9 +1,9 @@
 # Deep Review — accuracy, timing, benchmarks, client, drop-in (2026-09-17)
 
-**Status:** Review complete; roadmap proposed, nothing implemented.
+**Status:** Review complete (2026-09-17). Outcome as of 2026-09-19: §2 and the two conditioning/nasal leads were validated on real fixtures and landed ([deep-review-2026-09-results.md](deep-review-2026-09-results.md); composite 70.9 → 87.5 Cartesia, 85.6 → 90.7 Deepgram); [CLIENT-4] landed (no opacity coupling); the eval recorder confirmed [LAT-1]/[CLIENT-1] on live TTS (+300 ms at utterance start). The §8 roadmap is superseded by [README.md](README.md), the plan of record: stage A's timing items and a few small stage A/C fixes remain open, stage B is done, and stages C–D (consonant classes, the L4 layer, packaging, text alignment, the learned classifier) are parked or not planned. Line numbers cite `main` @ `517d038`.
 **Input:** `main` @ `517d038` (pipecat-ai 1.10.0, composite 70.9 on the Cartesia corpus per `plans/accuracy-improvements-2.md`).
 **Goal (user's words):** keep "something like the current DSP implementation that is fast, CPU-bound and accurate", push accuracy further on server and client, get the best honest benchmark score, revise the benchmarks, and make this a great drop-in for Pipecat.
-**Companions:** every `plans/*.md`; this document supersedes the "Further development" list in the README.
+**Companions:** every `plans/*.md`; the plan of record is now [README.md](README.md).
 
 ---
 

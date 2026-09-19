@@ -13,8 +13,9 @@ Goals:
 - **No fork** — built on released `pipecat-ai` (~1.10.0) using only stock
   extension points (frame processors, RTVI `server-message`); nothing in the
   framework is subclassed or patched.
-- **Playout-accurate** — keyframes ride the output transport's clock, staying
-  in sync with audio and discarded on interruption.
+- **Playout-accurate** — batches are scheduled on the pipeline clock just
+  ahead of playout, carry their exact lead so the client anchors on facts, and
+  are dropped on interruption.
 
 Implementation: `LipsyncProcessor` sits between the TTS service and the output
 transport, running a formant-based analyzer over the audio and emitting
@@ -34,23 +35,36 @@ hop (about 1 % of one core per bot).
 
 | Path                 | Purpose                                                                                                                                                                            |
 | -------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `server/lipsync/`    | The lipsync package: types, vendored DSP (LPC/Levinson, formants, pitch, P² quantiles), formant (Tier 0) analyzer, `LipsyncProcessor`, app-local frames, RTVI server-message relay |
+| `server/lipsync/`    | The lipsync package: types, vendored DSP (LPC/Levinson, formants, pitch, P² quantiles), formant analyzer, `LipsyncProcessor`, app-local frames, RTVI server-message relay |
 | `server/bot.py`      | Official `pipecat init quickstart` starter bot with the lipsync processor + relay wired in                                                                                         |
 | `server/tests/`      | Unit tests (DSP, analyzer, processor, relay, end-to-end through a headless output transport)                                                                                       |
-| `server/benchmarks/` | Accuracy harness (Praat reference + designed corpus, two provider voices, committed baselines)                                                                                    |
-| `client/`            | Vite + React web client: connects over SmallWebRTC, parses lipsync server-messages, renders an animated mouth with timing/event inspectors                                         |
-| `plans/`             | Technical specification, tuning/review notes, and the experiment scripts behind them                                                                                               |
+| `server/benchmarks/` | Accuracy harness (Praat reference + designed corpus, two provider voices, committed baselines) and the recorder behind the client's Eval tab                                       |
+| `client/`            | Vite + React web client: a Live tab (SmallWebRTC to the bot, animated mouth with timing/event inspectors) and an Eval tab that replays recorded clips                              |
+| `plans/`             | Plan of record ([plans/README.md](plans/README.md)): status, findings, what is and is not planned; the specification, tuning/review notes and experiment scripts behind them        |
 
 ## How delivery works
 
-`LipsyncProcessor` assigns each keyframe batch a `pts`, so the output
-transport's clock queue releases it at presentation time (~200 ms ahead of the
-matching audio), discarding unplayed batches on interruption. The relay sits
-immediately after `transport.output()`, so every batch it sees is already
-playout-timed; it wraps the batch in an `RTVIServerMessageFrame`, which the
-stock `RTVIObserver` forwards to the client as a standard `server-message`.
-Clients subscribe with the SDK's `onServerMessage` callback and demux on
-`data.type === "bot-tts-lipsync"` (see `client/src/lipsync/protocol.ts`).
+`LipsyncProcessor` emits a batch for each window of analyzed audio (the first
+100 ms of an utterance, then 200 ms windows) as soon as analysis is one hop past
+the window's end, and schedules it on the pipeline clock for 200 ms before the
+window plays. Its delivery task pushes the batch at that time; when the time has
+already passed (the first windows of a turn, whose audio has to be analyzed
+first), the batch goes out at once. Batches not yet released are dropped on
+interruption, in step with the discarded audio. A batch is a system frame, so
+the output transport forwards it immediately instead of queueing it: the
+transport's clock queue would hold it behind any earlier-queued word-timestamp
+frame with a later timestamp (for up to a word's length), and its audio-sync
+path would release it only once the audio queued ahead of it had played.
+
+`LipsyncMessageRelay` sits after `transport.output()` and wraps each batch in an
+`RTVIServerMessageFrame`, stamped with the window start (`ws`) and the lead
+still remaining at that moment (`lead`); the stock `RTVIObserver` forwards it
+as a standard `server-message`. Clients subscribe with the SDK's
+`onServerMessage` callback, demux on `data.type === "bot-tts-lipsync"`, and
+anchor the utterance on `now + lead − ws`: exact but for network transit, with
+no assumed lead (see `client/src/lipsync/protocol.ts` and `feed.ts`). Closure
+and silence events are confirmed after their window's batch has left and ride
+in the next one, keyed by offset, so an event may precede its batch's window.
 
 Timing follows the audio, not the arrival of frames:
 
@@ -60,10 +74,23 @@ Timing follows the audio, not the arrival of frames:
 - If the transport runs out of a context's audio before more arrives (the LLM
   stalled mid-response; pipecat ≥ 1.8 keeps one TTS context per turn), later
   batches are shifted by the gap and never straddle it. The shift travels on
-  the wire as `t0`, which the client adds to that batch's offsets.
+  the wire as `t0`, which the client adds to that batch's offsets and `ws`.
+  Keyframes that are already final when audio stops arriving are flushed after
+  100 ms rather than held until the window fills.
 - A TTS service that reopens a context id it already closed (the same id after
   its idle timeout) starts a new segment with offsets from zero; the client
-  re-anchors when offsets regress within one `ctx`.
+  re-anchors when `ws` regresses within one `ctx`.
+- On barge-in the client cuts the utterance at its playhead (plus a short grace
+  for its own audio latency) when the bot-stopped-speaking event arrives, and
+  ignores that utterance's batches still in flight.
+
+Measured on the eval corpus (19 lines, live Cartesia at 6–11× real time, the
+same audio and keyframes replayed through both paths): the client's anchor
+error at utterance start went from +309 ms median (worst +631; it assumed a
+200 ms lead the first batch never had) to −3 ms, the settled anchor from
+−90 ms to −3 ms, the first batch now leaves as playout starts (was 0.1–0.4 s
+after), and the longest a batch left late is 21 ms (was 840 ms, waiting behind
+a word-timestamp frame). Details in [plans/README.md](plans/README.md).
 
 ## Setup
 
@@ -80,7 +107,7 @@ npm --prefix client run dev   # viseme client on http://localhost:5173
 ## Tests
 
 ```bash
-cd server && uv run pytest    # 46 tests; ruff check . / ruff format . for lint
+cd server && uv run pytest    # 54 tests; ruff check . / ruff format . for lint
 ```
 
 ## Accuracy benchmark
@@ -101,28 +128,51 @@ checkout once the fixtures exist; fixtures themselves are not committed. While t
 `--set dsp.LPC_ORDER=14` overrides any `dsp`/`analyzer` constant for one run and `--tag`
 names the results file; `plans/experiments/ab_table.py` runs whole A/B ladders.
 
+## Eval tab
+
+The client's **Eval** tab plays a fixed corpus of clips (`server/benchmarks/eval_corpus.yaml`:
+probes mirroring the accuracy corpus plus bot-style lines) with their recorded audio and
+lipsync, to judge how things look without running the bot or talking to it.
+
+```bash
+cd server
+uv run python -m benchmarks.record                 # record the corpus (~1 min, CARTESIA_API_KEY)
+uv run python -m benchmarks.record --reanalyze     # offline: retained audio through the current lipsync code
+uv run python -m benchmarks.record --reanalyze --set dsp.LPC_ORDER=14 --tag order14   # A/B a tunable
+```
+
+Recording speaks each example in the bot's voice through the bot's output path (TTS →
+`LipsyncProcessor` → output transport → `LipsyncMessageRelay`), in real time, with a headless
+transport paced like SmallWebRTC's. It keeps the audio as played, every lipsync server-message
+with its release and due times, word timings, and the TTS arrival timeline, which
+`--reanalyze` replays (audio and word-timestamp frames) without calling the TTS, adding a run
+to the newest recording so changes compare on identical audio. Files land in
+`client/public/eval/` (gitignored), served as-is by the Vite dev server.
+
+In the tab, **as delivered** hands each batch to the stock feed at its recorded release time,
+so it anchors exactly as a connected client would (minus network); **ideal** puts every batch
+on time, isolating the analysis. The timeline shows the waveform, the rendered pose, events,
+batch arrivals (late ones in red) and words; per-clip stats cover the start lag, the settled
+anchor, batches that arrived after their audio began, and how late any batch was released.
+
 ## Further development
 
-A deep review of the whole project (verified findings, a benchmark revision and a
-ranked roadmap) is in [plans/deep-review-2026-09.md](plans/deep-review-2026-09.md);
-its §8 roadmap supersedes the tier list below. Its DSP findings were validated on
-real fixtures in [plans/deep-review-2026-09-results.md](plans/deep-review-2026-09-results.md).
+The aims are fixed: fast (keyframes reach the client ahead of playout), light
+on CPU (numpy-only DSP, about 1 % of one core per speaking bot) and drop-in
+for any TTS provider (nothing but the PCM stream, on released pipecat). The
+formant analyzer is the design of record and is judged close enough. The next
+step in fidelity would be a trained model, or provider-specific tiers (viseme
+events, timestamp + grapheme-to-phoneme); both are deliberately not planned.
+[plans/README.md](plans/README.md) is the plan of record: the status of every
+design and tuning note, the 2026-09 findings, and what is open.
 
-The formant analyzer is Tier 0 of a planned analyzer ladder; all tiers emit the
-same keyframe/event wire format, so clients are unaffected by tier choice.
+Open items, in order:
 
-- **Tier 1 — provider visemes:** consume Azure viseme events / Polly speech
-  marks via a TTS service hook; highest confidence where providers support it.
-- **Tier 2 — timestamp + G2P:** derive phonemes from word/char timestamps
-  (ElevenLabs, Cartesia) with grapheme-to-phoneme lookup.
-- **Tier 3 — phoneme model:** ONNX CTC phoneme recognition over the audio
-  stream (`onnxruntime` optional extra).
-- **Performance benchmark:** TTS→RTVI latency and CPU/RSS budget harness
-  (designed, not yet built).
-
-Nearest open items from the validation notes: the NASAL event also fires on
-dark voiced consonants (it needs a place cue or a broader name before clients
-style it), keyframe economy (28–31/s), and energy-gated closures.
+- **NASAL event** also fires on dark voiced consonants (ð, /w l/, voice bars);
+  it needs a place cue or a broader name before clients style it.
+- **Keyframe economy** (28–31/s against the 25/s guard) and **energy-gated
+  closures** (the mouth should close with the energy dip, not only badge it).
+- **Client:** events are shown as badges but do not shape the pose.
 
 ## License
 

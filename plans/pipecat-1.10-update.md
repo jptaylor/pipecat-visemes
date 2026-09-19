@@ -74,6 +74,8 @@ Client SDKs bumped to `@pipecat-ai/client-js` ^1.13, `client-react` ^1.8.2,
 
 ## Not done / follow-ups
 
+Tracked in [README.md](README.md) (the idle flush is part of the utterance-start latency item).
+
 - Tail latency during a mid-turn stall: keyframes for the last ~0.6 s before a
   gap are held by the event-finalize horizon until more audio arrives, so the
   mouth eases to rest slightly early; an idle flush timer would fix it.

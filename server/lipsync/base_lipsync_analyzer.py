@@ -10,10 +10,10 @@ A lipsync analyzer turns raw TTS audio into an articulation signal
 (:class:`~lipsync.types.LipsyncKeyframe` and
 :class:`~lipsync.types.LipsyncEvent`).
 :class:`~lipsync.lipsync_processor.LipsyncProcessor` owns
-buffering, timing and batching; analyzers only measure. Higher-fidelity tiers
-(provider-native visemes, word/char timestamps + G2P, phoneme recognition
-models) implement this same interface so the wire format stays unchanged
-across tiers.
+buffering, timing and batching; analyzers only measure. The formant analyzer
+is the only implementation and the design of record; the interface exists so
+measurement stays separable from delivery (a stub analyzer is enough to test
+the processor) and any alternative would leave the wire format unchanged.
 """
 
 from abc import ABC, abstractmethod

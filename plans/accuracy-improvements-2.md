@@ -11,6 +11,8 @@
 
 ---
 
+**Historical.** Superseded by the 2026-09-18 bundle ([deep-review-2026-09-results.md](deep-review-2026-09-results.md): 87.5 Cartesia / 90.7 Deepgram, six nasal-duty guards added to the composite). The `openness_r`/`width_r` targets §D gave up on (0.50/0.45) were reached by the DSP alone (0.65/0.56 Cartesia, 0.69/0.77 Deepgram) once voicing and conditioning lag were fixed, so the "structural answer is the analyzer tiers" claims below (accepted residuals, §D) no longer hold — no such tier is planned ([README.md](README.md)).
+
 **Status (original):** Ready for implementation
 **Input:** End state of the first tuning pass (`plans/accuracy-improvements.md`, COMPLETE): composite **70.1**, checks **16/22**, baseline re-set to 70.1 (`benchmarks/results/baseline.json`).
 **Goal:** Clear the six failing checks — honestly. Two of the three underlying problems are *measurement* problems (miscalibrated corpus expectations), one is a *signal* problem (peak compression). Fix the measurement first so the signal work is aimed at a true target.

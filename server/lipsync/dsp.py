@@ -8,7 +8,7 @@
 
 Vendored implementations (no scipy/librosa dependency) of the signal
 processing routines needed by
-:class:`~pipecat.audio.lipsync.formant_lipsync_analyzer.FormantLipsyncAnalyzer`:
+:class:`~lipsync.formant_lipsync_analyzer.FormantLipsyncAnalyzer`:
 LPC via autocorrelation + Levinson-Durbin, formant extraction from LPC roots,
 pitch by normalized cross-correlation (or the LPC residual), spectral features for nasal detection, and a
 streaming quantile estimator for adaptive normalization.

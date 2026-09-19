@@ -1,7 +1,7 @@
 # Pipecat Lipsync — Implementation Plan
 
-**Status:** Ready for implementation
-**Scope:** The Pipecat side only — everything needed to take the stubbed files in `src/` to a
+**Status:** Historical (implemented 2026-07-14/15). This plan built the lipsync package inside a pipecat fork (`src/pipecat/audio/lipsync/…`, an `RTVIObserver` branch). The code was then extracted into `server/lipsync/` on released pipecat-ai, with `LipsyncMessageRelay` replacing the observer branch and the frames kept app-local ([pipecat-1.10-update.md](pipecat-1.10-update.md)), and it is not being upstreamed. File paths and the M4/M5 observer and PR steps are therefore stale; the §11 decisions logs remain the record of why the analyzer is the way it is. Current status: [README.md](README.md).
+**Scope (original):** The Pipecat side only — everything needed to take the stubbed files in `src/` to a
 mergeable PR. Client SDKs, the eval/benchmark harness (tech spec §11.2–§11.5), and higher
 analyzer tiers (§8 tiers 1–3) are out of scope; unit tests per Pipecat conventions are in scope.
 **Companion:** [technical-specification.md](technical-specification.md) (referenced throughout as "spec §N").

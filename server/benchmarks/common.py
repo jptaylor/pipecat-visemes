@@ -1,12 +1,15 @@
 """Shared harness plumbing: corpus, TTS fixture cache, analyzer ingest mirror.
 
-Used by the accuracy and performance benchmark harnesses. Lives in the test
-harness only — never upstream. See plans/benchmark-harness-accuracy.md.
+Used by the accuracy benchmark and the eval recorder (``benchmarks.record``).
+Lives in the test harness only — never upstream. See
+plans/benchmark-harness-accuracy.md.
 """
 
+import ast
 import asyncio
 import json
 import os
+import subprocess
 import wave
 from collections.abc import AsyncIterator
 from dataclasses import dataclass
@@ -29,6 +32,7 @@ from pipecat.pipeline.worker import PipelineParams, PipelineWorker
 from pipecat.processors.frame_processor import FrameDirection, FrameProcessor
 from pipecat.workers.runner import WorkerRunner
 
+from lipsync import dsp, formant_lipsync_analyzer
 from lipsync.dsp import ANALYSIS_SAMPLE_RATE
 
 load_dotenv(override=True)
@@ -147,7 +151,7 @@ class _AudioCollector(FrameProcessor):
         await self.push_frame(frame, direction)
 
 
-def _make_tts(provider: str, voice_id: str):
+def make_tts(provider: str, voice_id: str):
     if provider == "cartesia":
         from pipecat.services.cartesia.tts import CartesiaTTSService
 
@@ -188,7 +192,7 @@ async def synthesize(provider: str, voice_id: str, text: str) -> tuple[bytes, in
 
     Returns (int16 mono PCM, sample rate).
     """
-    tts = _make_tts(provider, voice_id)
+    tts = make_tts(provider, voice_id)
     collector = _AudioCollector()
     pipeline = Pipeline([tts, collector])
     worker = PipelineWorker(pipeline, params=PipelineParams(), enable_rtvi=False)
@@ -220,12 +224,12 @@ def _fixture_paths(sentence: Sentence, voice: Voice, take: int) -> tuple[Path, P
     return base / f"take-{take}.wav", base / f"take-{take}.json"
 
 
-def _read_wav(path: Path) -> tuple[bytes, int]:
+def read_wav(path: Path) -> tuple[bytes, int]:
     with wave.open(str(path), "rb") as w:
         return w.readframes(w.getnframes()), w.getframerate()
 
 
-def _write_wav(path: Path, pcm: bytes, sample_rate: int):
+def write_wav(path: Path, pcm: bytes, sample_rate: int):
     path.parent.mkdir(parents=True, exist_ok=True)
     with wave.open(str(path), "wb") as w:
         w.setnchannels(1)
@@ -243,7 +247,7 @@ async def get_clip(
     if wav_path.exists() and meta_path.exists() and not refresh:
         meta = json.loads(meta_path.read_text())
         if meta.get("text") == sentence.text:
-            pcm, sample_rate = _read_wav(wav_path)
+            pcm, sample_rate = read_wav(wav_path)
             return Clip(sentence, voice, take, pcm, sample_rate)
         print(f"  stale fixture (text changed): {wav_path}")
 
@@ -252,7 +256,7 @@ async def get_clip(
 
     print(f"  synthesizing {voice.provider}/{voice.id[:12]}… {sentence.id} take {take}")
     pcm, sample_rate = await synthesize(voice.provider, voice.id, sentence.text)
-    _write_wav(wav_path, pcm, sample_rate)
+    write_wav(wav_path, pcm, sample_rate)
     meta_path.write_text(
         json.dumps(
             {
@@ -266,6 +270,56 @@ async def get_clip(
         )
     )
     return Clip(sentence, voice, take, pcm, sample_rate)
+
+
+#
+# Tunable overrides and provenance
+#
+
+# Modules whose constants ``--set`` may override for A/B runs.
+_OVERRIDE_MODULES = {"dsp": dsp, "analyzer": formant_lipsync_analyzer}
+
+
+def apply_overrides(specs: list[str]) -> dict[str, object]:
+    """Apply ``module.CONSTANT=value`` overrides before any analyzer is built.
+
+    Equivalent to editing the constant in the source: the lipsync modules read
+    their tunables at call time (nothing binds them at import). Unknown names
+    fail loudly so a typo cannot silently A/B nothing.
+    """
+    applied: dict[str, object] = {}
+    for spec in specs:
+        target, _, raw = spec.partition("=")
+        module_name, _, name = target.partition(".")
+        module = _OVERRIDE_MODULES.get(module_name)
+        if module is None or not raw or not hasattr(module, name):
+            raise SystemExit(
+                f"bad --set {spec!r}: expected {{dsp,analyzer}}.EXISTING_CONSTANT=value"
+            )
+        try:
+            value = ast.literal_eval(raw)
+        except (ValueError, SyntaxError):
+            try:
+                value = float(raw)  # "inf", "nan"
+            except ValueError:
+                value = raw
+        setattr(module, name, value)
+        applied[target] = value
+    return applied
+
+
+def src_sha() -> str:
+    """Short git sha of the checkout (the lipsync code lives in this repo)."""
+    try:
+        sha = subprocess.run(
+            ["git", "rev-parse", "--short", "HEAD"],
+            capture_output=True,
+            text=True,
+            timeout=5,
+        ).stdout.strip()
+        return sha or "unknown"
+    except Exception:
+        return "unknown"
 
 
 #

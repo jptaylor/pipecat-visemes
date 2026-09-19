@@ -11,11 +11,9 @@ Run: uv run python -m benchmarks.accuracy [--offline] [--compare]
 """
 
 import argparse
-import ast
 import asyncio
 import json
 import os
-import subprocess
 import sys
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
@@ -30,12 +28,13 @@ from benchmarks.common import (
     Clip,
     Sentence,
     Voice,
+    apply_overrides,
     chunks_16k_float32,
     get_clip,
     load_corpus,
+    src_sha,
     teardowns_pending,
 )
-from lipsync import dsp, formant_lipsync_analyzer
 from lipsync.base_lipsync_analyzer import LipsyncAnalysisContext
 from lipsync.formant_lipsync_analyzer import FormantLipsyncAnalyzer
 from lipsync.types import LipsyncEventKind
@@ -588,51 +587,6 @@ def report(results: list[ClipResult], run_meta: dict, baseline: dict | None):
 # Run orchestration
 #
 
-# Modules whose constants ``--set`` may override for A/B runs.
-_OVERRIDE_MODULES = {"dsp": dsp, "analyzer": formant_lipsync_analyzer}
-
-
-def apply_overrides(specs: list[str]) -> dict[str, object]:
-    """Apply ``module.CONSTANT=value`` overrides before any analyzer is built.
-
-    Equivalent to editing the constant in the source: the lipsync modules read
-    their tunables at call time (nothing binds them at import). Unknown names
-    fail loudly so a typo cannot silently A/B nothing.
-    """
-    applied: dict[str, object] = {}
-    for spec in specs:
-        target, _, raw = spec.partition("=")
-        module_name, _, name = target.partition(".")
-        module = _OVERRIDE_MODULES.get(module_name)
-        if module is None or not raw or not hasattr(module, name):
-            raise SystemExit(
-                f"bad --set {spec!r}: expected {{dsp,analyzer}}.EXISTING_CONSTANT=value"
-            )
-        try:
-            value = ast.literal_eval(raw)
-        except (ValueError, SyntaxError):
-            try:
-                value = float(raw)  # "inf", "nan"
-            except ValueError:
-                value = raw
-        setattr(module, name, value)
-        applied[target] = value
-    return applied
-
-
-def _src_sha() -> str:
-    # Lipsync code lives in this repo (formerly the pipecat fork at src/).
-    try:
-        sha = subprocess.run(
-            ["git", "rev-parse", "--short", "HEAD"],
-            capture_output=True,
-            text=True,
-            timeout=5,
-        ).stdout.strip()
-        return sha or "unknown"
-    except Exception:
-        return "unknown"
-
 
 async def run(args) -> dict:
     sentences, voice_map = load_corpus()
@@ -695,7 +649,7 @@ async def run(args) -> dict:
     return {
         "run": {
             "timestamp": datetime.now(UTC).isoformat(),
-            "src_sha": _src_sha(),
+            "src_sha": src_sha(),
             "provider": args.provider,
             "voices": [v.id for v in voices],
             "takes": args.takes,

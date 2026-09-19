@@ -13,17 +13,22 @@ between a TTS service and the output transport::
 
 It forwards every frame downstream immediately and unmodified (the audio path
 gains zero latency), taps ``TTSAudioRawFrame`` payloads into per-context ring
-buffers, analyzes them in a dedicated task, and emits playout-timed
-``TTSLipsyncFrame`` batches. Because the batches carry ``pts``, the output
-transport releases them at presentation time through the same clock-queue
-mechanism used for word timestamps, including discarding unplayed batches on
-interruption. :class:`~lipsync.rtvi.LipsyncMessageRelay`, placed after
+buffers, analyzes them in a dedicated task, and emits ``TTSLipsyncFrame``
+batches. Each batch is scheduled on the pipeline clock just ahead of its
+window's playout and pushed at that time by the processor's own delivery
+task; as a system frame it passes straight through the output transport
+(whose clock queue would hold it behind any earlier-queued word-timestamp
+frame with a later timestamp, and whose audio-sync path would release it
+only after the audio queued ahead of it had played). Batches not yet
+released are dropped on interruption, in step with the discarded audio.
+:class:`~lipsync.rtvi.LipsyncMessageRelay`, placed after
 ``transport.output()``, then delivers each released batch to clients as a
 standard RTVI ``server-message`` whose ``data.type`` is ``"bot-tts-lipsync"``.
 Works with any ``TTSService``; no provider-specific requirements.
 """
 
 import asyncio
+import bisect
 
 import numpy as np
 from loguru import logger
@@ -48,10 +53,7 @@ from lipsync.base_lipsync_analyzer import (
     LipsyncFrameResult,
 )
 from lipsync.dsp import ANALYSIS_SAMPLE_RATE
-from lipsync.formant_lipsync_analyzer import (
-    EVENT_FINALIZE_HORIZON_SEC,
-    FormantLipsyncAnalyzer,
-)
+from lipsync.formant_lipsync_analyzer import HOP_SECONDS, FormantLipsyncAnalyzer
 from lipsync.frames import LipsyncUpdateSettingsFrame, TTSLipsyncFrame
 from lipsync.types import LipsyncEvent, LipsyncEventKind, LipsyncKeyframe
 
@@ -71,6 +73,23 @@ _END_DRAIN_TIMEOUT_SECS = 1.0
 # paces its writes, so small overshoots are normal).
 _PLAYOUT_GAP_TOLERANCE_SECS = 0.1
 
+# Keyframes are final one hop after their own (zero-phase conditioning), so a
+# window is emitted as soon as analysis is one hop past its end. Closures and
+# silences are confirmed later (the analyzer's EVENT_FINALIZE_HORIZON_SEC) and
+# ride in whichever batch is emitted once they are known.
+_KEYFRAME_HORIZON_SEC = HOP_SECONDS
+
+# The first window of each utterance is this short, so its batch leaves as
+# soon as the first 0.14 s of audio has been analyzed; later windows use
+# ``batch_window_ms``.
+_FIRST_WINDOW_SEC = 0.1
+
+# With no new audio for this long while a context is open, what is already
+# final is emitted as a short batch instead of waiting for the window to fill:
+# an LLM stalling mid-turn would otherwise hold the tail of the previous
+# sentence until the next one arrived.
+_IDLE_FLUSH_SECS = 0.1
+
 _INT16_SCALE = 32768.0
 
 
@@ -80,7 +99,9 @@ class LipsyncParams(BaseModel):
     Parameters:
         batch_window_ms: Audio time covered by one emitted ``TTSLipsyncFrame``.
         scheduling_lead_ms: How far ahead of playout batches are released,
-            giving the client scheduler runway.
+            giving the client scheduler runway. The lead actually remaining
+            when a batch is sent goes on the wire, so clients anchor on it
+            rather than assuming this value.
         dead_band: Minimum parameter delta since the last emitted keyframe
             required to emit a new one. Applied by the default analyzer;
             explicitly constructed analyzers own their conditioning settings.
@@ -167,11 +188,12 @@ class LipsyncProcessor(FrameProcessor):
     Copies TTS audio into per-context ring buffers and analyzes it off the
     frame path with a pluggable
     :class:`~lipsync.base_lipsync_analyzer.BaseLipsyncAnalyzer`
-    (by default the formant/DSP tier, which works with any TTS provider).
-    Emits ``TTSLipsyncFrame`` batches whose ``pts`` schedules delivery just
-    ahead of audio playout; a :class:`~lipsync.rtvi.LipsyncMessageRelay`
-    after ``transport.output()`` turns each released batch into an RTVI
-    ``server-message`` with ``data.type`` ``"bot-tts-lipsync"``.
+    (by default the formant analyzer, which works with any TTS provider).
+    Emits ``TTSLipsyncFrame`` batches, each pushed by the processor's delivery
+    task at its scheduled release time just ahead of audio playout; a
+    :class:`~lipsync.rtvi.LipsyncMessageRelay` after ``transport.output()``
+    turns each released batch into an RTVI ``server-message`` with
+    ``data.type`` ``"bot-tts-lipsync"``.
 
     Analysis failures never propagate to the pipeline: on an unexpected
     error the processor reports a non-fatal ``ErrorFrame`` and degrades to
@@ -205,9 +227,9 @@ class LipsyncProcessor(FrameProcessor):
 
         Args:
             params: Batching, conditioning and scheduling parameters.
-            analyzer: Analysis tier to use. Defaults to
+            analyzer: Analyzer to use. Defaults to
                 :class:`~lipsync.formant_lipsync_analyzer.FormantLipsyncAnalyzer`,
-                the provider-universal DSP tier, configured with this
+                the provider-universal formant analyzer, configured with this
                 processor's ``dead_band`` and ``heartbeat_ms``.
             **kwargs: Additional arguments passed to parent class.
         """
@@ -226,6 +248,11 @@ class LipsyncProcessor(FrameProcessor):
         self._sample_rate = 0
         self._wake = asyncio.Event()
         self._task: asyncio.Task | None = None
+        # Batches waiting for their release time, ordered by (release, seq).
+        self._scheduled: list[tuple[int, int, TTSLipsyncFrame]] = []
+        self._schedule_seq = 0
+        self._deliver_wake = asyncio.Event()
+        self._deliver_task: asyncio.Task | None = None
         self._generation = 0
         # Playout end of the most recently ingested audio, so a context that
         # queues behind another one is anchored where that audio ends rather
@@ -237,7 +264,8 @@ class LipsyncProcessor(FrameProcessor):
             "batches_emitted": 0,
             "keyframes_emitted": 0,
             "events_emitted": 0,
-            "pts_clamped": 0,
+            "release_clamped": 0,
+            "idle_flushes": 0,
             "playout_gaps": 0,
             "bytes_dropped": 0,
             "contexts_opened": 0,
@@ -246,7 +274,7 @@ class LipsyncProcessor(FrameProcessor):
 
     @property
     def stats(self) -> dict[str, int]:
-        """Diagnostic counters (batches, drops, clamps); read-only snapshot."""
+        """Diagnostic counters (batches, drops, late releases); read-only snapshot."""
         return dict(self._stats)
 
     async def setup(self, setup: FrameProcessorSetup):
@@ -259,11 +287,9 @@ class LipsyncProcessor(FrameProcessor):
         self._sample_rate = setup.audio_out_sample_rate
 
     async def cleanup(self):
-        """Clean up the processor and cancel the analysis task."""
+        """Clean up the processor and cancel its tasks."""
         await super().cleanup()
-        if self._task:
-            await self.cancel_task(self._task)
-            self._task = None
+        await self._cancel_tasks()
 
     async def process_frame(self, frame: Frame, direction: FrameDirection):
         """Forward all frames unmodified, tapping TTS frames for analysis.
@@ -306,6 +332,7 @@ class LipsyncProcessor(FrameProcessor):
             return
         await self._analyzer.start(self._sample_rate)
         self._task = self.create_task(self._analysis_task_handler())
+        self._deliver_task = self.create_task(self._delivery_task_handler())
 
     def _open_context(self, context_id: str | None) -> _Context | None:
         """The live (not yet closed) context for ``context_id``, if any."""
@@ -367,7 +394,7 @@ class LipsyncProcessor(FrameProcessor):
         self._wake.set()
 
     async def _handle_interruption(self):
-        # The transport discards unplayed batches from its clock queue itself.
+        # Batches not yet released go the way of the discarded audio.
         await self._discard_analysis_state()
 
     async def _handle_update_settings(self, frame: LipsyncUpdateSettingsFrame):
@@ -383,6 +410,8 @@ class LipsyncProcessor(FrameProcessor):
         """Drop buffers and in-flight work; adaptive analyzer state survives."""
         self._generation += 1
         self._contexts.clear()
+        self._scheduled.clear()
+        self._deliver_wake.set()
         # Queued audio was discarded too, so nothing is playing after now.
         self._last_playout_end = 0
         if self._task:
@@ -402,24 +431,42 @@ class LipsyncProcessor(FrameProcessor):
         if not self._task.done():
             await self.cancel_task(self._task)
         self._task = None
+        # The pipeline is ending: release whatever is still scheduled now (the
+        # relay stamps each batch with its true lead, so early delivery is
+        # harmless to clients), then retire the delivery task.
+        if self._deliver_task:
+            await self.cancel_task(self._deliver_task)
+            self._deliver_task = None
+        while self._scheduled:
+            _, _, frame = self._scheduled.pop(0)
+            await self.push_frame(frame)
 
     async def _cancel(self):
+        await self._cancel_tasks()
+        self._contexts.clear()
+
+    async def _cancel_tasks(self):
         if self._task:
             await self.cancel_task(self._task)
             self._task = None
-        self._contexts.clear()
+        if self._deliver_task:
+            await self.cancel_task(self._deliver_task)
+            self._deliver_task = None
+        self._scheduled.clear()
 
     #
     # Analysis task
     #
 
     async def _analysis_task_handler(self):
-        """Drain buffered audio, analyze, batch and emit playout-timed frames.
+        """Drain buffered audio, analyze, batch and schedule frames.
 
         Single long-lived task per processor. Parks on an event while there
         is no work (bot silence, or ``enabled`` False), so the idle cost is
-        zero. Any unexpected error disables lipsync for the session and
-        reports a non-fatal error upstream; the pipeline keeps running.
+        zero; while a context is open with final keyframes waiting for their
+        window to fill, the park is bounded by the idle flush. Any unexpected
+        error disables lipsync for the session and reports a non-fatal error
+        upstream; the pipeline keeps running.
         """
         try:
             while True:
@@ -427,7 +474,15 @@ class LipsyncProcessor(FrameProcessor):
                     await self._process_context(context)
                 if self._stopping:
                     break
-                await self._wake.wait()
+                idle = self._idle_context()
+                if idle is None:
+                    await self._wake.wait()
+                else:
+                    try:
+                        await asyncio.wait_for(self._wake.wait(), _IDLE_FLUSH_SECS)
+                    except TimeoutError:
+                        await self._emit_batches(idle, self._generation, final=False, idle=True)
+                        continue
                 self._wake.clear()
         except asyncio.CancelledError:
             raise
@@ -437,6 +492,55 @@ class LipsyncProcessor(FrameProcessor):
             await self.push_error(
                 "Lipsync analysis failed; disabling lipsync for this session", exception=e
             )
+
+    async def _delivery_task_handler(self):
+        """Push each scheduled batch downstream at its release time.
+
+        Sleeps until the earliest scheduled release; woken early when a batch
+        is scheduled or the schedule is dropped (interruption).
+        """
+        clock = self.get_clock()
+        try:
+            while True:
+                if not self._scheduled:
+                    await self._deliver_wake.wait()
+                    self._deliver_wake.clear()
+                    continue
+                wait = nanoseconds_to_seconds(self._scheduled[0][0] - clock.get_time())
+                if wait > 0:
+                    try:
+                        await asyncio.wait_for(self._deliver_wake.wait(), wait)
+                    except TimeoutError:
+                        continue
+                    self._deliver_wake.clear()
+                    continue
+                _, _, frame = self._scheduled.pop(0)
+                await self.push_frame(frame)
+        except asyncio.CancelledError:
+            raise
+        except Exception as e:
+            self._failed = True
+            self._contexts.clear()
+            self._scheduled.clear()
+            await self.push_error(
+                "Lipsync delivery failed; disabling lipsync for this session", exception=e
+            )
+
+    def _idle_context(self) -> _Context | None:
+        """The active context, if it is open, idle, and has final keyframes waiting."""
+        if not self._contexts:
+            return None
+        context = self._contexts[0]
+        if context.closing or context.buffer:
+            return None
+        frontier = context.cursor - _KEYFRAME_HORIZON_SEC
+        if frontier <= context.window_start + 1e-9:
+            return None
+        if any(k.offset < frontier for k in context.pending_keyframes) or any(
+            e.offset < frontier for e in context.pending_events
+        ):
+            return context
+        return None
 
     def _active_context(self) -> _Context | None:
         """The context currently being analyzed, if it has pending work.
@@ -500,10 +604,18 @@ class LipsyncProcessor(FrameProcessor):
                 )
             )
 
-    async def _emit_batches(self, context: _Context, generation: int, final: bool):
+    async def _emit_batches(
+        self, context: _Context, generation: int, final: bool, idle: bool = False
+    ):
         window = self._params.batch_window_ms / 1000.0
         while generation == self._generation:
-            window_end = context.window_start + window
+            # Keyframes before the frontier are final; events confirmed later
+            # ride in later batches (see TTSLipsyncFrame).
+            frontier = context.cursor - _KEYFRAME_HORIZON_SEC
+            first = context.window_start == 0.0
+            window_end = context.window_start + (
+                min(window, _FIRST_WINDOW_SEC) if first else window
+            )
             if final:
                 if not context.pending_keyframes and not context.pending_events:
                     return
@@ -513,14 +625,18 @@ class LipsyncProcessor(FrameProcessor):
                     + [e.offset for e in context.pending_events]
                 )
                 window_end = max(window_end, context.cursor, last + 1e-6)
+            elif window_end > frontier + 1e-9:
+                if not idle or frontier <= context.window_start + 1e-9:
+                    return
+                # No audio is arriving to fill the window: emit what is final
+                # as a short one.
+                window_end = frontier
             # A batch never straddles a playout gap: the audio on each side
             # of it plays at different times.
             for gap_offset, _ in context.gaps:
                 if context.window_start < gap_offset < window_end:
                     window_end = gap_offset
                     break
-            if not final and context.cursor < window_end + EVENT_FINALIZE_HORIZON_SEC:
-                return
 
             keyframes = [k for k in context.pending_keyframes if k.offset < window_end]
             events = [e for e in context.pending_events if e.offset < window_end]
@@ -531,6 +647,8 @@ class LipsyncProcessor(FrameProcessor):
 
             if keyframes or events:
                 await self._push_batch(context, context.window_start, window_end, keyframes, events)
+                if idle:
+                    self._stats["idle_flushes"] += 1
             context.window_start = window_end
 
     async def _push_batch(
@@ -550,26 +668,30 @@ class LipsyncProcessor(FrameProcessor):
         events.sort(key=lambda e: e.offset)
 
         playout_offset = context.playout_shift(window_start)
+        playout_ns = context.t0 + seconds_to_nanoseconds(window_start + playout_offset)
+        release_ns = playout_ns - seconds_to_nanoseconds(self._params.scheduling_lead_ms / 1000.0)
+        now = self.get_clock().get_time()
+        if release_ns < now:
+            release_ns = now
+            self._stats["release_clamped"] += 1
         frame = TTSLipsyncFrame(
             context_id=context.context_id,
             window_start=window_start,
             window_end=window_end,
             playout_offset=playout_offset,
+            playout_ns=playout_ns,
+            release_ns=release_ns,
             keyframes=keyframes,
             events=events,
         )
         frame.transport_destination = context.transport_destination
 
-        lead = seconds_to_nanoseconds(self._params.scheduling_lead_ms / 1000.0)
-        pts = context.t0 + seconds_to_nanoseconds(window_start + playout_offset) - lead
-        now = self.get_clock().get_time()
-        if pts < now:
-            pts = now
-            self._stats["pts_clamped"] += 1
-        frame.pts = pts
-
         self._stats["batches_emitted"] += 1
         self._stats["keyframes_emitted"] += len(keyframes)
         self._stats["events_emitted"] += len(events)
 
-        await self.push_frame(frame)
+        # Even a batch that is already due goes through the delivery task, so
+        # batches always leave in release order.
+        self._schedule_seq += 1
+        bisect.insort(self._scheduled, (release_ns, self._schedule_seq, frame))
+        self._deliver_wake.set()

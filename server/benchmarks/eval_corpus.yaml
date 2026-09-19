@@ -1,0 +1,87 @@
+# Eval corpus: the examples the client's Eval tab plays back, recorded through
+# the bot's TTS and lipsync pipeline by `python -m benchmarks.record`.
+#
+# Probe ids mirror corpus.yaml, so a clip can be cross-checked against the
+# accuracy benchmark; the conversational lines are the kind of thing the bot
+# actually says. `look_for` is shown next to the clip as a viewing hint.
+
+examples:
+  # Probes
+  - id: vowel-aa
+    text: "Father was calm as he walked past the palm trees."
+    tags: [probe, vowel]
+    look_for: "Jaw wide open on the 'ah' vowels: father, calm, palm."
+  - id: vowel-ee
+    text: "See the green trees? Please believe me, these seeds are free."
+    tags: [probe, vowel]
+    look_for: "Lips spread on every 'ee': see, green, trees, seeds."
+  - id: vowel-oo
+    text: "Soon the new moon grew blue, and the room felt cool."
+    tags: [probe, vowel]
+    look_for: "Lips rounded and pushed forward on 'oo': soon, moon, blue, cool."
+  - id: bilabial-mama
+    text: "Mama made more mashed potatoes for my mother."
+    tags: [probe, closure]
+    look_for: "A full lip closure on every m."
+  - id: bilabial-bob
+    text: "Bob put a big pepper in the paper bag."
+    tags: [probe, closure]
+    look_for: "A full lip closure on every b and p."
+  - id: nasal-hum
+    text: "Hmm. Hmm, hmm."
+    tags: [probe, nasal]
+    look_for: "Lips stay closed through each hum."
+  - id: pause-probe
+    text: "Wait for it. Now continue talking normally."
+    tags: [probe, silence]
+    look_for: "Mouth settles to rest in the pause after 'Wait for it.'"
+  - id: harvard-01
+    text: "The birch canoe slid on the smooth planks."
+    tags: [probe]
+    look_for: "General tracking on a phonetically balanced sentence."
+  - id: harvard-02
+    text: "Glue the sheet to the dark blue background."
+    tags: [probe, nasal]
+    look_for: "Known residual: NASAL also latches on dark consonants; only 'background' has a real nasal."
+
+  # Conversational
+  - id: greeting
+    text: "Hi there! I'm your voice assistant. What can I help you with today?"
+    tags: [conversational]
+    look_for: "A typical opener: natural motion, closure on 'm' in I'm."
+  - id: short-ack
+    text: "Sure, one moment."
+    tags: [conversational, short]
+    look_for: "Short turn: does the mouth catch the first syllable, or start late?"
+  - id: got-it
+    text: "Got it."
+    tags: [conversational, short]
+    look_for: "Very short turn: the whole utterance fits in the first batches."
+  - id: booking
+    text: "Would you like a table for two at seven, or would eight work better?"
+    tags: [conversational]
+    look_for: "Rounding on 'would' and 'two'; closures on the b in 'table' and 'better'."
+  - id: numbers
+    text: "Your order total is forty-two dollars and fifteen cents, and it ships on March third."
+    tags: [conversational]
+    look_for: "Fast, dense articulation: does the track keep up?"
+  - id: recipe
+    text: "You'll need flour, butter, sugar, two eggs, a cup of milk, and a pinch of salt."
+    tags: [conversational]
+    look_for: "List prosody with short pauses between items; closures on butter, cup, milk, pinch."
+  - id: explanation
+    text: "Photosynthesis is how plants make their own food. They pull in carbon dioxide from the air and water from the soil, then use energy from sunlight to turn them into sugar. Oxygen is released along the way, which is pretty lucky for the rest of us."
+    tags: [conversational, long]
+    look_for: "A long multi-sentence turn: tracking holds up and sentence breaks relax the mouth."
+  - id: excited
+    text: "Oh wow, that's wonderful news! Congratulations, you must be thrilled."
+    tags: [conversational]
+    look_for: "Expressive delivery: bigger openings, rounding on 'oh wow'."
+  - id: hesitation
+    text: "Hmm, let me think about that for a second. Okay, yes, I believe that works."
+    tags: [conversational]
+    look_for: "The opening hum stays closed; the pause after 'second' rests."
+  - id: empathy
+    text: "I'm sorry to hear that. Would it help if we went through it step by step?"
+    tags: [conversational]
+    look_for: "Soft delivery: closures on I'm, step by step."

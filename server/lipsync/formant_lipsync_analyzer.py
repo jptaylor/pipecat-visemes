@@ -4,9 +4,9 @@
 # SPDX-License-Identifier: BSD 2-Clause License
 #
 
-"""Formant-based lipsync analyzer (DSP tier).
+"""Formant-based lipsync analyzer.
 
-The default, provider-universal analyzer. Estimates a continuous articulation
+The provider-universal analyzer and the design of record. Estimates a continuous articulation
 signal directly from TTS audio using LPC formant tracking — no provider
 timestamps, phoneme models or per-voice calibration required — with a bounded
 CPU and memory footprint suitable for always-on use.

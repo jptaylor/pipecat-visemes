@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react";
 
 import type { FeedStats, LipsyncFeed } from "../lipsync/feed";
+import { Stat } from "./Stat";
 
 /** Message/keyframe rates, scheduler health, and the A/V trim control. */
 export function StatsBar({ feed }: { feed: LipsyncFeed }) {
@@ -29,7 +30,7 @@ export function StatsBar({ feed }: { feed: LipsyncFeed }) {
         <Stat
           label="lead"
           value={stats?.lastLeadMs != null ? `${stats.lastLeadMs.toFixed(0)}ms` : "—"}
-          title="How far ahead of playout the last batch arrived (target ~200ms; the first batch of a turn is often late)"
+          title="How far ahead of its window's playout the last batch arrived (the server aims for 200ms; the first batches of a turn are late by design, as their audio has to be analyzed first)"
         />
         <Stat label="resyncs" value={stats ? String(stats.resyncs) : "—"} />
         <Stat label="ctx" value={stats?.ctx ? stats.ctx.slice(0, 8) : "—"} />
@@ -58,14 +59,5 @@ export function StatsBar({ feed }: { feed: LipsyncFeed }) {
         </pre>
       )}
     </div>
-  );
-}
-
-function Stat({ label, value, title }: { label: string; value: string; title?: string }) {
-  return (
-    <span className="stat" title={title}>
-      <span className="stat-label">{label}</span>
-      <span className="stat-value">{value}</span>
-    </span>
   );
 }

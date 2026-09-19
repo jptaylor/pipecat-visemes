@@ -1,8 +1,26 @@
 # Pipecat Server-Side Lipsync / Viseme Generation — Technical Specification
 
-**Status:** Draft for review
+**Status:** Design of record, as built (revised 2026-09-19). Written 2026-07 for an in-tree pipecat implementation; the code now lives in `server/lipsync/` on released `pipecat-ai` (~1.10.0) and is not being upstreamed. The table below lists where the implementation departs from the text; the sections are otherwise left as written, and §8–§13 are rewritten to reflect that the formant analyzer is the final design (no further tiers).
 **Scope:** Server-side only. Client-side rendering, shape tables, and interpolation are out of scope.
-**Owner:** TBD
+**Companions:** [README.md](README.md) (plan of record, open items), [pipecat-implementation.md](pipecat-implementation.md) §11 (2026-07 decisions), [deep-review-2026-09-results.md](deep-review-2026-09-results.md) (2026-09 tuning), [pipecat-1.10-update.md](pipecat-1.10-update.md) (timing model on per-turn TTS contexts).
+
+### As built — where the implementation departs from this document
+
+| Section | Spec says | As built | Where decided |
+|---|---|---|---|
+| §2.2, §7 | `RTVIObserver` emits `bot-tts-lipsync` when it sees `TTSLipsyncFrame`, gated by `RTVIObserverParams.bot_lipsync_enabled`; the transport's clock queue releases the frame at `pts` | No observer changes: `LipsyncMessageRelay`, placed after `transport.output()`, wraps each released batch in an `RTVIServerMessageFrame`; the stock observer sends it as a `server-message` with `data.type = "bot-tts-lipsync"`. Since 2026-09-19 the processor's own delivery task schedules each batch on the pipeline clock and pushes it (a system frame, forwarded at once by the transport) at playout minus the lead; the clock queue is not used, because it holds a frame behind any earlier-queued word-timestamp frame with a later pts | pipecat-1.10-update.md; README.md (delivery timing) |
+| §2.3 | `t0` = clock at first audio; continuity via the last emitted pts | First sample anchored at `max(now, playout end of already-ingested audio)`; audio arriving after the transport ran dry shifts later windows by the gap (`playout_offset`, wire `t0`); a reopened context id starts a new segment with offsets from zero | pipecat-1.10-update.md |
+| §3.1 | `DataFrame` with `pts` | `SystemFrame` with `playout_ns` and `release_ns` (no `pts`); `playout_offset`; events may precede the window (late closures/silences); contexts kept as an ordered list, since one id can reopen | pipecat-1.10-update.md; README.md |
+| §4.2 nasal | 1-hop entry on strong evidence | 2 consecutive hops; nasal features from the pre-emphasized spectrum; "missing F2 counts as damped" kept (needed on the Deepgram voice) | accuracy-improvements.md, deep-review-2026-09-results.md |
+| §4.3 | P5/P95, 150 voiced frames to converge | P10/P90, 60 frames; adaptation spike rejection instead of an Hz median | accuracy-improvements-2.md |
+| §4.4 | `c_lpc × c_conv × c_snr`; the client lerps toward neutral by confidence | `c_lpc × c_fit × c_snr × √c_conv` (`c_fit` from LPC prediction gain, full at log10 gain 3.2); diagnostic only — on real speech it mostly tracks loudness (~0.15), so clients scale neither pose nor opacity by it | pipecat-implementation.md §11, deep review [CONF-1] |
+| §4.5 | Trailing 3-frame median, slew 0.25/hop, dead band 0.04 | Zero-phase median (hop t is emitted when t+1 arrives), slew 0.4/hop, dead band 0.05; heartbeats suppressed during silence | deep-review-2026-09-results.md |
+| §5.2 | LPC order 12; pitch from LPC-residual autocorrelation, clarity 0.35 | Order 16; F2/F3 slot prior in assignment; voicing by normalized cross-correlation on a separate 40 ms raw frame (threshold 0.6, peak-fraction gate 0.05), residual method kept as a fallback; `f1_broad` (a broad F1-band root) feeds the openness mapping when the F1 slot is empty | deep-review-2026-09-results.md |
+| §5.3 | `r[0] *= 1.0001` | `1 + 1e-6` | pipecat-implementation.md §11 |
+| §6.1 | `LipsyncParams` dataclass | pydantic `BaseModel`; `dead_band`/`heartbeat_ms` are forwarded to the analyzer | pipecat-implementation.md §11 |
+| §6.4 | batch at window close, 200 ms windows | keyframes and NASAL leave one hop (20 ms) after the window end; CLOSURE and SILENCE ride late in the next batch; the first window of an utterance is 100 ms; final keyframes are flushed after 100 ms without audio (mid-turn stall). The 0.4 s event-finalize horizon of 2026-07 held every batch and made the first one of each turn late | README.md (delivery timing) |
+| §5.1, §10 | `soxr` resampling in the analyzer front end | pipecat's stream resampler in the processor's ingest; the analyzer contract is 16 kHz float32 | pipecat-implementation.md §11 |
+| §11 | MFA phoneme truth, CI gates, a loopback timing rig, a performance harness | Praat + designed-corpus harness with committed baselines; delivery timing from the eval recorder; no CI, no performance harness | README.md |
 
 ---
 
@@ -16,14 +34,14 @@ Generate a real-time mouth-articulation signal from streamed TTS audio and deliv
 - Continuous articulation signal (openness/width/rounding) rather than discrete viseme IDs as the primary channel; discrete events only for closures/nasals.
 - Sample-accurate offsets server-side; playout-aligned delivery via the existing `pts` / clock-queue mechanism in `BaseOutputTransport`.
 - No per-voice calibration step. Online adaptive normalization from generic priors.
-- Zero cost when disabled; bounded, small cost when enabled (< 3% of one core, < 20 MB RSS per session for the DSP tier).
-- Extension seam for higher-fidelity tiers (provider-native visemes, char/word timestamps + G2P, model-based phoneme recognition) behind the same wire format.
+- Zero cost when disabled; bounded, small cost when enabled (< 3% of one core, < 20 MB RSS per session).
+- One analyzer interface between measurement and delivery, so the timing/batching path does not depend on how the signal is measured.
 
 ### 1.2 Non-Goals
 
 - Consonant-accurate viseme classification in v1 (only closure + nasal detection).
 - Emotion/expression classification (pitch/energy are exposed; interpretation is client-side).
-- Forced alignment (future tier).
+- Forced alignment, phoneme recognition or a trained model — not planned (see [README.md](README.md)).
 - Client SDK implementation.
 
 ### 1.3 Design principles
@@ -63,7 +81,7 @@ TTSAudioRawFrame ──▶ passthrough ─────────────�
                                                                             │
                                               _clock_task_handler releases at pts (pipeline clock)
                                                                             │
-                                                     RTVIObserver → bot-tts-lipsync message
+                                                     LipsyncMessageRelay (after transport.output()) → RTVIServerMessageFrame → RTVIObserver → server-message
 ```
 
 This reuses the exact release mechanism used by word timestamps (`TTSTextFrame.pts`): frames with `pts` are queued in `MediaSender._clock_queue` and pushed downstream at presentation time relative to the pipeline clock (`transport.get_clock().get_time()`, nanoseconds). Interruptions cancel/recreate the clock task, discarding unplayed batches in lockstep with discarded audio — no new interruption machinery needed on the transport side.
@@ -180,7 +198,7 @@ Contract: client target = `lerp(neutral_schwa, estimated_shape, confidence)`.
 
 ## 5. DSP Implementation
 
-All NumPy-only. Vendored in `pipecat/audio/lipsync/dsp.py` (~400–500 LOC). No new runtime dependency for the default tier.
+All NumPy-only. Vendored in `server/lipsync/dsp.py`. No runtime dependency beyond numpy (pipecat's own resampler is used on ingest).
 
 ### 5.1 Front end
 
@@ -255,7 +273,7 @@ class LipsyncParams:
 
 ### 7.1 Message
 
-New server message `bot-tts-lipsync`, emitted by `RTVIObserver` on seeing `TTSLipsyncFrame` (frame arrives at the observer already playout-timed by the clock queue, minus `scheduling_lead`).
+A standard RTVI `server-message` whose `data.type` is `bot-tts-lipsync`, emitted by `LipsyncMessageRelay` for each `TTSLipsyncFrame` the output transport releases (already playout-timed by the clock queue, minus `scheduling_lead`); the stock `RTVIObserver` forwards it unchanged.
 
 ```json
 {
@@ -271,18 +289,18 @@ New server message `bot-tts-lipsync`, emitted by `RTVIObserver` on seeing `TTSLi
 ```
 
 - `kf` tuple order: `[offset, openness, width, rounding, energy, pitch, confidence]` — positional arrays over named fields for size.
-- `version` field mandatory; schema is expected to evolve (model tier adds phoneme class).
-- Gate behind `RTVIObserverParams.bot_lipsync_enabled: bool = False`.
+- `version` field mandatory so the schema can evolve additively. Version 2 (2026-09-19) added `ws` (window start, audio seconds) and `lead` (seconds until that window plays, measured when the message is sent, negative when analysis is behind playout) and millisecond precision on timing fields; the client anchors the utterance on `now + lead − (ws + t0)`.
+- No observer gating: the message exists only when `LipsyncMessageRelay` is in the pipeline.
 - Follows the existing `bot-tts-text` precedent: separate channel, not attached to transcription messages, independent granularity.
 
 ### 7.2 Enable/disable
 
-- Static: processor present in pipeline + observer param.
+- Static: processor and relay present in the pipeline.
 - Runtime: `LipsyncParams.enabled` togglable via a `LipsyncUpdateSettingsFrame` (pattern: `TTSUpdateSettingsFrame`); when disabled, passthrough only — analysis task idles on the event, zero CPU.
 
 ---
 
-## 8. Extension Seam — Tiered Analyzers
+## 8. Analyzer Seam
 
 ```python
 class BaseLipsyncAnalyzer(ABC):
@@ -296,16 +314,13 @@ class BaseLipsyncAnalyzer(ABC):
     async def reset(self): ...
 ```
 
-| Tier | Analyzer | Source | Status |
-|---|---|---|---|
-| 0 | `FormantLipsyncAnalyzer` | DSP §5 | v1, default |
-| 1 | `ProviderVisemeAnalyzer` | Azure viseme events / Polly speech marks | later; requires TTS service hook `add_viseme_timestamps()` mirroring `add_word_timestamps()` |
-| 2 | `TimestampG2PAnalyzer` | char/word timestamps (ElevenLabs, Cartesia) + G2P | later; optional dep |
-| 3 | `PhonemeModelAnalyzer` | ONNX CTC phoneme model | later; `onnxruntime` optional extra |
+`FormantLipsyncAnalyzer` (§4–§5) is the only implementation and the design of record. The interface stays because it separates measurement from timing and batching — the processor and relay never look inside a keyframe — which keeps the processor testable with a stub analyzer and leaves an alternative possible without committing to one.
 
-All tiers emit the same `LipsyncKeyframe`/`LipsyncEvent` shapes; tiers 1–3 populate higher confidence and may add fields under `version` bumps. Tier selection is explicit (constructor), not auto-negotiated, in v1.
+The tiers this section originally listed — provider viseme events (Azure/Polly), word/char timestamps + G2P, and an ONNX phoneme model — are not planned (2026-09-19):
 
-Note for Tier 1: provider viseme/timestamp data enters via the TTS service (websocket receive loop), not the audio stream — the analyzer interface for that tier consumes service-side callbacks; `LipsyncProcessor` then only handles timing/batching. Design the processor so analysis-source and emission are separable (`LipsyncEmitter` internal component shared by both paths).
+- Provider-specific sources contradict the first goal in §1.1. Pipecat 1.10 exposes no viseme data for any service (Azure subscribes only to word boundaries; ElevenLabs collapses character alignment to words), so such a tier would need per-provider service subclasses anyway.
+- A trained model (the deep review's "Tier 0.5": ~46 features from the existing DSP, 20–50 k parameters, forced-aligned TTS data, +10–25 µs/hop) is the obvious next step in consonant fidelity. It is not worth its training pipeline for clients that render a continuous mouth; the DSP signal is judged close enough.
+- Text-informed alignment (the sentence text is already in the frame stream) is the cheapest route to bilabial precision if a client ever needs it; parked, see [README.md](README.md).
 
 ---
 
@@ -315,29 +330,23 @@ Note for Tier 1: provider viseme/timestamp data enters via the TTS service (webs
 - **Steady-state allocation-free DSP** (§5.3).
 - **Adaptive idle:** analysis task blocks on `asyncio.Event`; no polling during bot silence.
 - **Batch pts clamping** prevents burst release when TTS outruns playout at utterance start.
-- **Per-process model cost (Tier 3, future):** lazy model load on first enable; int8 ONNX; ≤ 30 M param target due to per-bot-process RSS multiplication on Pipecat Cloud.
 - **Wire compaction:** positional arrays, 2-decimal float quantization at serialization (client springs make finer precision meaningless).
 
 ---
 
 ## 10. Dependencies
 
-Runtime (Tier 0): **none new.** `numpy` (core dep) + `soxr` (core dep). LPC/Levinson-Durbin vendored.
+Runtime: **none new.** `numpy` (a pipecat core dependency); resampling on ingest through pipecat's stream resampler. LPC/Levinson-Durbin vendored.
 
-Rejected for runtime: `librosa` (heavy transitive deps: numba/llvmlite — known cross-platform/py-version friction inside Pipecat installs), `scipy` (avoidable for order-12 LPC; keep out of core).
+Rejected for runtime: `librosa` (heavy transitive deps: numba/llvmlite — known cross-platform/py-version friction inside Pipecat installs), `scipy` (avoidable for the LPC in use; keep out of core).
 
-Optional extras (future tiers):
-
-| Extra | Package | Tier |
-|---|---|---|
-| `pipecat-ai[lipsync-g2p]` | `phonemizer` (espeak-ng backend; note GPL runtime lib — evaluate `g2p_en` as pure-Python fallback) | 2 |
-| `pipecat-ai[lipsync-model]` | `onnxruntime>=1.18` | 3 |
-
-Dev/test only (never runtime): `praat-parselmouth` (reference formant tracker), `montreal-forced-aligner` (ground-truth phoneme boundaries for the eval corpus).
+Dev/test only (never runtime): `praat-parselmouth` (reference formant tracker for the accuracy harness), `pyyaml` (corpus files). Montreal Forced Aligner was never adopted — not pip-installable in practice (deep review §6.6) — and no phoneme truth is planned.
 
 ---
 
 ## 11. Testing & Benchmarking
+
+As built: §11.1 is `server/tests/` (54 tests, including an end-to-end run through a headless output transport and the relay, the delivery schedule, and the eval recorder's replay). §11.2 became the Praat + designed-corpus accuracy harness with committed baselines ([benchmark-harness-accuracy.md](benchmark-harness-accuracy.md)) rather than MFA truth and CI gates. §11.3's loopback rig is the eval recorder (`server/benchmarks/record.py`), which measures each batch's release time against playout through a real output transport with a real-time simulated device. §11.4 is measured as µs per hop by the accuracy harness; the standalone performance harness was designed and not built. §11.5 is manual, against the client's eval playback. The original text follows.
 
 ### 11.1 Unit
 
@@ -368,16 +377,17 @@ Dev/test only (never runtime): `praat-parselmouth` (reference formant tracker), 
 
 ---
 
-## 12. Rollout
+## 12. Rollout (as it happened)
 
-1. `TTSLipsyncFrame` + `LipsyncProcessor` + Tier 0 analyzer behind experimental flag; RTVI message versioned `1`.
-2. Eval corpus + CI gates.
-3. Docs + foundational example (pairs with a reference web client, out of scope here).
-4. Tier 1 (Azure/Polly) once `add_viseme_timestamps()` service hook lands.
+1. 2026-07: `TTSLipsyncFrame`, `LipsyncProcessor`, the formant analyzer and the RTVI wiring built in a pipecat fork (`pipecat-implementation.md`), then extracted into this standalone app on released pipecat-ai, with the relay replacing the observer branch and the frames kept app-local.
+2. 2026-07: accuracy harness and two tuning passes (composite 28.8 → 70.9 on the Cartesia corpus).
+3. 2026-09-17: pipecat-ai 1.10.0 — per-turn TTS contexts, playout gaps and `t0` on the wire (`pipecat-1.10-update.md`); upstreaming considered and declined.
+4. 2026-09-18: deep review; the DSP bundle, zero-phase conditioning and 2-hop nasal entry validated on two voices (87.5 / 90.7).
+5. Open: utterance-start latency and the other items in [README.md](README.md).
 
 ## 13. Open Questions
 
-- Carry `voice_id` on `TTSStartedFrame` to key adaptive-state cache across voice switches mid-session?
-- Should `scheduling_lead` adapt to measured transport latency (Daily vs SmallWebRTC vs WebSocket serializers)?
-- Binary encoding (msgpack) if event density grows with Tier 3 — defer until measured.
-- Multi-destination transports: per-destination `MediaSender` clock queues already isolate timing; confirm `transport_destination` propagation on `TTSLipsyncFrame`.
+- Carry a voice key so adaptive state survives a mid-session voice switch? Still open. The stock `TTSService` consumes `TTSUpdateSettingsFrame`, so the key would have to come from the app (deep review [ADAPT-2]); the example bot does not switch voices.
+- Should `scheduling_lead` adapt to measured transport latency? Not pursued; the actual lead is on the wire (version 2), so the client anchors on it and needs no assumption.
+- Binary encoding (msgpack)? Not needed at 28–31 keyframes/s and ≤ 5 messages/s; JSON stays.
+- Multi-destination transports: per-destination clock queues isolate timing, but `transport_destination` propagation on `TTSLipsyncFrame` has not been exercised.

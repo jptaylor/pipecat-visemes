@@ -2,6 +2,8 @@
 
 **Status:** COMPLETE (2026-07-14). Composite **28.8 → 70.1** (target ≥55, stretch ≥65 — both beaten). Re-baselined to 70.1 at exit; the original baseline is preserved as `results/baseline-original-28.8.json`, per-fix snapshots as `results/accuracy-after-fix-N.json`.
 
+**Historical.** Superseded by the 2026-07-15 pass ([accuracy-improvements-2.md](accuracy-improvements-2.md), 70.9) and the 2026-09-18 DSP bundle ([deep-review-2026-09-results.md](deep-review-2026-09-results.md), 87.5 Cartesia / 90.7 Deepgram). File paths refer to the pre-`server/` tree, and the `results/…` snapshots named here are no longer tracked (only `baseline*.json` are). Current status: [README.md](README.md).
+
 **Outcomes vs §6 targets:** `f2_mae` 625→**154** (beat stretch) · `f1_mae` 237→**72** (beat stretch) · `f1_r` 0.35→0.73 · `openness_r` 0.21→0.34 (short of 0.50) · `width_r` 0.15→0.35 (short of 0.45) · keyframe rate **24.1/s** ✓ · checks 12/22→**16/22** (short of 19) · conf gap 0.05 cold / 0.06 warm (short of 0.15 — see below).
 
 **Deviations discovered while executing (the measure-everything discipline paid off):**

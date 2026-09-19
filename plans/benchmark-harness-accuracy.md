@@ -1,7 +1,7 @@
 # Benchmark Harness — Accuracy
 
-**Status:** Ready for implementation (after implementation plan M1+M2)
-**Location:** Root project (`benchmarks/`), never upstream — the pipecat PR stays free of harness code.
+**Status:** Built (2026-07-14) and in use; this is the design it was built to. As built (2026-09-19): it lives in `server/benchmarks/` (`accuracy.py`, `common.py`, `corpus.yaml`); baselines are committed (`results/baseline.json`, Cartesia 87.5; `results/baseline-deepgram.json`, 90.7) and fixtures are not; the corpus expectations were re-calibrated as oracle-based peak checks ([accuracy-improvements-2.md](accuracy-improvements-2.md) §A); since 2026-09-18 it also reports L1 coverage, `openness_lag_ms`/`width_lag_ms`, `openness_jitter` and `nasal_fraction` (with `nasal_fraction_max` guards), and takes `--set module.CONST=value`, `--tag` and `--ceiling` for A/B runs ([deep-review-2026-09-results.md](deep-review-2026-09-results.md)). The composite is the §8.4 one plus the six nasal guards; the "composite v2" / L4 phoneme layer proposed by the deep review is not planned ([README.md](README.md)).
+**Location:** `server/benchmarks/`, harness only — never part of the lipsync package.
 **Goal:** A lightweight, repeatable score of how accurately the lipsync implementation turns
 TTS audio into articulation signals, across multiple voices and multiple synthesis takes,
 against a corpus of sentences with known expectations. The score's job is to point at

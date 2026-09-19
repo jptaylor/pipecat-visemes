@@ -4,19 +4,21 @@
 # SPDX-License-Identifier: BSD 2-Clause License
 #
 
-"""Relays playout-timed lipsync batches to clients as RTVI server-messages.
+"""Relays lipsync batches to clients as RTVI server-messages.
 
-Place :class:`LipsyncMessageRelay` immediately AFTER ``transport.output()``::
+Place :class:`LipsyncMessageRelay` after ``transport.output()``::
 
     ... → TTSService → LipsyncProcessor → transport.output() → LipsyncMessageRelay → ...
 
-The output transport holds each pts-carrying ``TTSLipsyncFrame`` in its clock
-queue and re-pushes it downstream at presentation time (discarding unplayed
-frames on interruption), so every frame this relay sees is already
-playout-timed and seen exactly once. The relay wraps the batch in an
-``RTVIServerMessageFrame``, which the stock ``RTVIObserver`` forwards to the
-client as ``{label: "rtvi-ai", type: "server-message", data: {...}}`` — no
-observer subclass or observer params needed.
+The processor pushes each ``TTSLipsyncFrame`` at its scheduled release time
+(just ahead of the window's playout), and the frame passes straight through
+the output transport, so the relay sees every batch exactly once, when it is
+due. The relay wraps the batch in an ``RTVIServerMessageFrame``, stamping it
+with the window start and the lead still remaining at that moment, which the
+stock ``RTVIObserver`` forwards to the client as
+``{label: "rtvi-ai", type: "server-message", data: {...}}`` — no observer
+subclass or observer params needed. Placing the relay after the transport
+keeps that lead stamp as close to the client as the pipeline allows.
 """
 
 from pipecat.frames.frames import Frame
@@ -29,32 +31,52 @@ from lipsync.frames import TTSLipsyncFrame
 # server-message stream.
 LIPSYNC_MESSAGE_TYPE = "bot-tts-lipsync"
 
+# Version 2 added ``ws`` and ``lead`` (and millisecond timing precision); the
+# keyframe and event rows are unchanged from version 1.
+LIPSYNC_MESSAGE_VERSION = 2
 
-def lipsync_message_data(frame: TTSLipsyncFrame) -> dict:
+
+def lipsync_message_data(frame: TTSLipsyncFrame, now_ns: int) -> dict:
     """Pack a TTSLipsyncFrame as compact, JSON-safe server-message data.
 
     Keyframes and events are positional arrays rather than named fields to
-    keep the wire size small, with floats quantized to two decimals (client-
-    side smoothing makes finer precision meaningless). Keyframe order is
-    ``[offset, openness, width, rounding, energy, pitch, confidence]``; event
-    order is ``[offset, kind, duration, confidence]``. Offsets are seconds of
-    audio from the first sample of ``ctx``; ``t0`` is a playout shift the
-    client adds to all offsets (nonzero only after the bot's audio stalled
-    partway through the context). The schema is versioned: higher-fidelity
-    analysis tiers may add fields under a ``version`` bump.
+    keep the wire size small. Keyframe order is ``[offset, openness, width,
+    rounding, energy, pitch, confidence]``; event order is ``[offset, kind,
+    duration, confidence]``. Timing values (offsets, durations, ``t0``,
+    ``ws``, ``lead``) are quantized to milliseconds, pose values to two
+    decimals (client-side interpolation makes finer precision meaningless).
+
+    Offsets are seconds of audio from the first sample of ``ctx``; ``t0`` is
+    a playout shift the client adds to all offsets and to ``ws`` (nonzero
+    only after the bot's audio stalled partway through the context). ``ws``
+    is the batch's window start and ``lead`` how far ahead of that window's
+    playout the message is being sent, measured now (negative when analysis
+    is behind playout, as at the start of a turn). A client anchors the
+    utterance on them: audio offset ``ws + t0`` plays ``lead`` seconds after
+    the message arrives, less network transit.
+
+    Args:
+        frame: The batch to pack.
+        now_ns: Pipeline clock time at which the message is being sent.
     """
 
     def q(value: float) -> float:
         return round(value, 2)
 
+    def ms(value: float) -> float:
+        return round(value, 3)
+
+    lead = (frame.playout_ns - now_ns) / 1e9 if frame.playout_ns else 0.0
     return {
         "type": LIPSYNC_MESSAGE_TYPE,
-        "version": 1,
+        "version": LIPSYNC_MESSAGE_VERSION,
         "ctx": frame.context_id,
-        "t0": q(frame.playout_offset),
+        "t0": ms(frame.playout_offset),
+        "ws": ms(frame.window_start),
+        "lead": ms(lead),
         "kf": [
             [
-                q(k.offset),
+                ms(k.offset),
                 q(k.openness),
                 q(k.width),
                 q(k.rounding),
@@ -64,20 +86,22 @@ def lipsync_message_data(frame: TTSLipsyncFrame) -> dict:
             ]
             for k in frame.keyframes
         ],
-        "ev": [[q(e.offset), str(e.kind), q(e.duration), q(e.confidence)] for e in frame.events],
+        "ev": [[ms(e.offset), str(e.kind), ms(e.duration), q(e.confidence)] for e in frame.events],
     }
 
 
 class LipsyncMessageRelay(FrameProcessor):
-    """Emits one RTVI server-message per playout-timed lipsync batch.
+    """Emits one RTVI server-message per released lipsync batch.
 
     Forwards every frame unchanged; additionally, each downstream
-    ``TTSLipsyncFrame`` is packed with :func:`lipsync_message_data` and pushed
-    as an ``RTVIServerMessageFrame``.
+    ``TTSLipsyncFrame`` is packed with :func:`lipsync_message_data` (stamped
+    with the lead remaining at this moment) and pushed as an
+    ``RTVIServerMessageFrame``.
     """
 
     async def process_frame(self, frame: Frame, direction: FrameDirection):
         await super().process_frame(frame, direction)
         await self.push_frame(frame, direction)
         if direction == FrameDirection.DOWNSTREAM and isinstance(frame, TTSLipsyncFrame):
-            await self.push_frame(RTVIServerMessageFrame(data=lipsync_message_data(frame)))
+            now = self.get_clock().get_time()
+            await self.push_frame(RTVIServerMessageFrame(data=lipsync_message_data(frame, now)))

@@ -8,3 +8,5 @@ __pycache__/
 server/benchmarks/fixtures/
 server/benchmarks/results/*
 !server/benchmarks/results/baseline*.json
+# Eval tab recordings (python -m benchmarks.record); regenerate or commit a set deliberately
+client/public/eval/

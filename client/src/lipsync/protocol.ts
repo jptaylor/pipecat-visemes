@@ -9,6 +9,11 @@
  * positional arrays for wire compaction, offsets are seconds of audio from
  * the first sample of `ctx`, and `t0` is a playout shift added to all
  * offsets (nonzero only after the bot's audio stalled mid-utterance).
+ * Version 2 adds `ws`, the batch's window start, and `lead`, how far ahead
+ * of that window's playout the server sent the message: audio offset
+ * `ws + t0` plays `lead` seconds after arrival, less network transit, which
+ * is what the feed anchors on. Events may precede a batch's window (a
+ * closure is confirmed only once speech resumes after it).
  */
 
 export const LIPSYNC_MESSAGE_TYPE = "bot-tts-lipsync";
@@ -40,6 +45,10 @@ export interface LipsyncEvent {
 export interface LipsyncBatch {
   version: number;
   ctx: string | null;
+  /** Window start in seconds from the utterance's first audio (t0 applied); version 2. */
+  windowStart?: number;
+  /** Seconds until the window starts playing, at send time; version 2. */
+  lead?: number;
   keyframes: LipsyncKeyframe[];
   events: LipsyncEvent[];
   /** Original message data, for the raw inspector. */
@@ -59,6 +68,8 @@ export function parseLipsyncData(data: unknown): LipsyncBatch | null {
   return {
     version: typeof d.version === "number" ? d.version : 1,
     ctx: typeof d.ctx === "string" ? d.ctx : null,
+    windowStart: typeof d.ws === "number" ? t0 + d.ws : undefined,
+    lead: typeof d.lead === "number" ? d.lead : undefined,
     keyframes: kf.map(
       ([offset, openness, width, rounding, energy, pitch, confidence]) => ({
         offset: t0 + offset,

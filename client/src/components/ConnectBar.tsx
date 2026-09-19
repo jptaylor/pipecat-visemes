@@ -44,10 +44,7 @@ export function ConnectBar({ feed }: { feed: LipsyncFeed }) {
   };
 
   return (
-    <header className="connect-bar">
-      <h1>
-        Pipecat <span className="accent">Lipsync</span>
-      </h1>
+    <div className="connect-bar">
       <span className={`state state-${transportState}`}>{transportState}</span>
       {error && <span className="connect-error">{error}</span>}
       <div className="connect-actions">
@@ -80,6 +77,6 @@ export function ConnectBar({ feed }: { feed: LipsyncFeed }) {
           </button>
         )}
       </div>
-    </header>
+    </div>
   );
 }

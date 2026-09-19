@@ -8,12 +8,8 @@ import { useState, type ComponentProps } from "react";
 
 import "./App.css";
 import { ConnectBar } from "./components/ConnectBar";
-import { EventLog } from "./components/EventLog";
-import { Meters } from "./components/Meters";
-import { MouthCard } from "./components/MouthCard";
-import { StatsBar } from "./components/StatsBar";
-import { Timeline } from "./components/Timeline";
-import { TranscriptCard } from "./components/TranscriptCard";
+import { EvalView } from "./components/EvalView";
+import { LiveView } from "./components/LiveView";
 import { LipsyncFeed } from "./lipsync/feed";
 import { parseLipsyncData } from "./lipsync/protocol";
 
@@ -35,6 +31,10 @@ function createSession(): Session {
         const batch = parseLipsyncData(data);
         if (batch) feed.ingest(batch);
       },
+      // Fires at once on barge-in (the server drops the unplayed audio and
+      // the batches not yet sent) and as the last audio leaves at a natural
+      // turn end; the feed keeps a short grace window either way.
+      onBotStoppedSpeaking: () => feed.cut(),
     },
   });
   return { client, feed };
@@ -45,29 +45,50 @@ function createSession(): Session {
 // at runtime; cast at the provider boundary only.
 type ProviderClient = ComponentProps<typeof PipecatClientProvider>["client"];
 
+type Tab = "live" | "eval";
+
+const TABS: { id: Tab; label: string; title: string }[] = [
+  { id: "live", label: "Live", title: "Talk to the bot" },
+  { id: "eval", label: "Eval", title: "Play back recorded clips, no bot needed" },
+];
+
 export default function App() {
   const [{ client, feed }] = useState(createSession);
+  // The tab lives in the URL hash so a reload (or a bookmark) keeps it.
+  const [tab, setTab] = useState<Tab>(() => (window.location.hash === "#eval" ? "eval" : "live"));
   // Dev-only hook for driving the mouth with synthetic batches from the
   // console. Assigned here rather than in createSession so it always points
   // at the session React kept (StrictMode runs the initializer twice).
   if (import.meta.env.DEV) Object.assign(window, { lipsyncFeed: feed });
 
+  const selectTab = (next: Tab) => {
+    setTab(next);
+    const { pathname, search } = window.location;
+    window.history.replaceState(null, "", next === "eval" ? "#eval" : pathname + search);
+  };
+
   return (
     <PipecatClientProvider client={client as unknown as ProviderClient} autoInitDevices>
       <div className="app">
-        <ConnectBar feed={feed} />
-        <main className="grid">
-          <section className="col">
-            <TranscriptCard />
-            <MouthCard feed={feed} />
-            <Meters feed={feed} />
-          </section>
-          <section className="col">
-            <Timeline feed={feed} />
-            <EventLog feed={feed} />
-          </section>
-        </main>
-        <StatsBar feed={feed} />
+        <header className="app-header">
+          <h1>
+            Pipecat <span className="accent">Lipsync</span>
+          </h1>
+          <nav className="tabs">
+            {TABS.map(({ id, label, title }) => (
+              <button
+                key={id}
+                className={tab === id ? "tab tab-active" : "tab"}
+                title={title}
+                onClick={() => selectTab(id)}
+              >
+                {label}
+              </button>
+            ))}
+          </nav>
+          {tab === "live" && <ConnectBar feed={feed} />}
+        </header>
+        {tab === "live" ? <LiveView feed={feed} /> : <EvalView />}
       </div>
       <PipecatClientAudio />
     </PipecatClientProvider>
