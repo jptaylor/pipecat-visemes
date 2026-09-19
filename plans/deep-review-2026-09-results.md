@@ -139,3 +139,79 @@ Hum duty on Deepgram drops because that voice's murmur carries a narrow ~1.55 kH
 † with the six new nasal guards in the composite. CPU unchanged (185 µs/hop). Baselines re-saved. Residuals: harvard-02/t2 on Cartesia reads nasal duty 0.41 against the 0.30 bar (a dark sentence: "Glue the sheet to the dark blue background"); Deepgram's nasal-hum openness_p90 is 0.29 against 0.30 — the open hops are the breathy "H" onset, NCC-voiced but with no F1, decaying toward the 0.35 neutral; pause-probe silences on Deepgram (pre-existing).
 
 Next levers, in order: the NASAL event needs a place cue or a rename ("dark voiced closure") before clients style it; keyframe economy (28–31/s vs the 25/s guard — the dead band is a constructor default the harness cannot sweep yet); [CONS-1] energy-gated closures, now that the conditioning no longer hides timing. Tracked, together with what the eval recorder found since (utterance-start latency), in [README.md](README.md).
+
+---
+
+## Third pass (2026-09-19): the /u/ vowels read as murmurs
+
+Found from the Eval tab, not the benchmark: "Soon the new moon grew blue, and the room felt cool"
+rendered with the mouth shut through its /u/ words — 48 % of the clip's keyframes at the nasal
+override level, nasal duty 0.62 / 0.53 on the two Cartesia takes (0.28 / 0.29 on Deepgram). The
+benchmark could not see it: the sentence's only check was the rounding peak, which "cool" meets,
+and the nasal-duty guards were on the harvard and bilabial sentences.
+
+A per-hop dump against Praat (take 1, "Soon the new moon") showed this voice's /u/ in two forms.
+In "Soon" and "new" the F2 root is there at 650–1000 Hz (Praat: 700–1150) but 380–960 Hz wide, so
+it was either dropped by the 500 Hz formant cap and read as "missing" (which counts as damped) or
+kept and read as "broad" — murmur evidence either way. In "moon" the vowel between /m/ and /n/ is
+nasalized: F1 330–440 Hz, a narrow F2 at 1.8–1.9 kHz and a low-band ratio above 0.9, which is
+exactly the spurious-F2 rule's definition of a murmur. The true murmurs (the /m/ of "moon", the
+/n/ of "Soon") have no root at all between 500 and 1200 Hz, and on the hum takes F2 is always
+found, narrow, at 1850–1990 Hz (`nasal_tap.py --hist`). So the cue is "any root in the back-vowel
+F2 range above F1, however broad".
+
+Ladder on both voices (nasal duty per take; hum p90 is the hum probe's openness bar, ≤ 0.30):
+
+| variant | Cartesia oo t1/t2 | ee t1/t2 | harvard-03 | hum p90 | Deepgram oo | ee | hum p90 |
+|---|---|---|---|---|---|---|---|
+| before | 0.62 / 0.53 | 0.41 / 0.39 | 0.17 | 0.19 | 0.28 / 0.29 | 0.10 / 0.23 | 0.29 |
+| F2 slot band edge 500 or 550 Hz | 0.62 / 0.53 | 0.41 / 0.39 | 0.17 | 0.19 | 0.28 / 0.29 | 0.10 / 0.23 | 0.29 |
+| missing F2 counts only when dark | 0.58 / 0.48 | 0.25 / 0.24 | 0.15 | 0.19 | 0.24 / 0.28 | 0.07 / 0.08 | 0.29 |
+| F1 cap 350 Hz | 0.53 / 0.49 | 0.18 / 0.26 | 0.09 | 0.22 | 0.18 / 0.12 | 0.08 / 0.15 | 0.29 |
+| mid-band ratio ≤ 0.15 | 0.62 / 0.53 | 0.41 / 0.38 | 0.15 | 0.19 | 0.25 / 0.29 | 0.10 / 0.23 | 0.29 |
+| low-root veto (`f2_low` ≤ 1200 Hz) | 0.49 / 0.48 | 0.36 / 0.33 | 0.13 | 0.19 | 0.20 / 0.17 | 0.10 / 0.23 | 0.29 |
+| **veto + F1 cap 350 (landed)** | **0.41 / 0.45** | **0.12 / 0.20** | **0.09** | **0.22** | **0.10 / 0.03** | **0.08 / 0.15** | **0.29** |
+| veto + F1 cap 320 | 0.33 / 0.41 | 0.07 / 0.11 | 0.09 | 0.26 | 0.10 / 0.00 | 0.07 / 0.11 | 0.29 |
+
+Lowering the F2 slot band's edge does nothing (the root is not out of band, it is too broad for
+the cap); the mid-band ratio does nothing; the veto is the lever for the back vowels and the F1
+cap for the nasalized ones. 320 Hz buys a little more but halves the hum margin on one voice.
+
+Landed:
+
+- `dsp.lpc_formants` reports `f2_low` (the lowest root above F1 from 500 Hz up, any bandwidth up
+  to 1000 Hz, whichever root won the F2 slot) and `f2_broad` (a broad F2-band root when the slot
+  is empty — rounding evidence for the mapping, like `f1_broad`, never a measurement).
+- `_NASAL_VOWEL_F2_MAX_HZ = 1200`: a low root vetoes the murmur reading. `_NASAL_F1_MAX_HZ = 350`
+  (was off). The override now caps openness at `_NASAL_OPENNESS_MAX = 0.15` instead of forcing
+  0.05: a murmur's F1 sits at the learned floor and maps near zero anyway, while a nasalized vowel
+  keeps a small opening and its rounding.
+- Rounding's low-side openness gate is gone (`_ROUNDING_OPEN_GATE` keeps the wide-open side): it
+  zeroed the rounding of /u/, whose opening is small by nature. Vetoed back vowels keep an
+  openness of at least 0.1 (`_ROUNDED_VOWEL_MIN_OPENNESS`; their F1, 210–300 Hz on these voices,
+  maps to a shut mouth otherwise).
+- Guards: vowel-oo `nasal_fraction_max: 0.45` (six nasals and the nasalized vowels between them
+  come to roughly 0.45 of voiced time; the bar catches the /u/ vowels reading as murmurs),
+  vowel-ee 0.30.
+
+| | Cartesia before | after | Deepgram before | after |
+|---|---|---|---|---|
+| composite | 87.5 (85.2 with the two new guards) | **87.5** | 90.7 | **92.0** |
+| checks | 27/28 | 31/32 | 26/28 | 30/32 |
+| openness_r / width_r | 0.65 / 0.56 | 0.62 / 0.57 | 0.69 / 0.77 | 0.74 / 0.79 |
+| vowel-oo rounding p90 | 0.80 | 1.00 | 0.84 | 0.91 |
+| harvard-02/t2 nasal duty (was a residual) | 0.41 | 0.23 | — | — |
+| f1 / f2 mae | 24 / 112 | 24 / 113 | 24 / 75 | 24 / 75 |
+
+On the eval recording (the bot's live Cartesia voice), the oo clip's keyframes at the override
+level fell from 48 % to 22 %: "grew" 80 → 0 %, "blue" 47 → 0 %, "Soon" 50 → 18 %, "room" 78 → 60 %,
+"new" 100 → 67 %, "moon" 100 → 57 % — what remains is the /n/ and /m/ themselves — and the /u/
+words carry rounding again (new / moon / room 0.00 / 0.13 / 0.11 → 0.18 / 0.23 / 0.39). The ee
+clip went from 21 % to 12 %. Deepgram's rise comes partly from the freed rounding motion emitting
+keyframes where openness was under-sampled (openness_r 0.70 → 0.74 with the gate change alone).
+
+Residuals: vowel-oo/t2 reads 0.454 against the 0.45 bar; the hum probe's p90 rose 0.19 → 0.22 on
+Cartesia (the F1 cap releases hum hops with F1 above 350 Hz); rounding is F2-only, so any low-F2
+vowel (/ɑ ɔ/ in "calm", "walked") reads as rounded (vowel-aa rounding p90 0.73) — [ROUND-1]; the
+NASAL label still latches on dark voiced consonants (harvard-03 duty 0.09–0.15).
+

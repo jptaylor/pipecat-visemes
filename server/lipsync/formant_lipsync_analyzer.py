@@ -103,6 +103,15 @@ _NASAL_F2_MAX_BANDWIDTH_HZ = 300.0
 _NASAL_MISSING_F2_DAMPED = "always"
 _NASAL_DARK_RATIO = 0.9
 _NASAL_SPURIOUS_F2_HZ = 1200.0
+# A root at or below this above F1 (``FormantEstimate.f2_low``: any
+# bandwidth, whichever root won the F2 slot) vetoes the murmur reading.
+# Measured on both corpus voices, murmurs have no root between 500 and
+# 1200 Hz (their F2, when found, sits at 1.5-1.9 kHz, which the spurious rule
+# handles), while a back vowel's F2 lands at 500-1000 Hz — on one voice as a
+# root too broad for the strict formant cap, which the missing-F2 rule then
+# read as a murmur and shut the mouth on every /u/ (vowel-oo nasal duty
+# 0.53-0.62 before the veto).
+_NASAL_VOWEL_F2_MAX_HZ = 1200.0
 # Enter after this many consecutive hops of nasal evidence, exit after as
 # many without. Never a single hop: a 1-hop fast path on a very dark frame
 # latched on /w u l ð/ and the voice bar of voiced stops (26–29 % of the
@@ -111,14 +120,28 @@ _NASAL_SPURIOUS_F2_HZ = 1200.0
 # windows were measured: 3-hop entry loses hums, 3–4-hop exit brings the
 # false latches back.
 _NASAL_HYSTERESIS_HOPS = 2
-# Extra murmur evidence, both disabled (inf): F1 (found or held) at most this,
-# and at most this fraction of spectral energy in 500-1500 Hz (a murmur's
-# antiformant empties that band). Measured on both corpus voices: neither
-# separates murmurs from the dark voiced consonants the detector also latches
-# on (F1 <= 400 and mid <= 0.10 each moved the false duty cycle by ~0.01).
-_NASAL_F1_MAX_HZ = float("inf")
+# Extra murmur evidence: F1 (found or held) at most this, and at most this
+# fraction of spectral energy in 500-1500 Hz (a murmur's antiformant empties
+# that band; disabled). Neither separates murmurs from dark voiced consonants
+# (measured 2026-09-18: ~0.01 of duty each), but the F1 cap does separate
+# them from nasalized vowels — "moon", "new": nasal spectrum, F1 330-440 Hz,
+# open mouth — which the spurious-F2 rule otherwise reads as murmurs. A
+# murmur's F1 is the ~250 Hz nasal formant. 350 keeps the hum probes on both
+# voices (320 buys a little more but halves one voice's hum margin).
+_NASAL_F1_MAX_HZ = 350.0
 _NASAL_MID_RATIO_MAX = float("inf")
-_NASAL_OPENNESS = 0.05
+# While the override is active the mapped openness is capped here rather than
+# forced shut: a murmur's F1 sits at the learned floor and maps near zero
+# anyway, while a nasalized vowel (nasal spectrum, open mouth — "moon", "new")
+# keeps a small opening and its rounding instead of a shut mouth.
+_NASAL_OPENNESS_MAX = 0.15
+# A back rounded vowel (the nasal detector's veto: a root at 500-1200 Hz
+# above F1) keeps at least this opening: its F1 (~210-300 Hz on the corpus
+# voices) sits at the learned floor and would otherwise map to a shut mouth.
+_ROUNDED_VOWEL_MIN_OPENNESS = 0.1
+# Rounding is gated off only for wide-open mouths (a low-side gate on
+# openness zeroed the rounding of /u/, whose opening is small by nature).
+_ROUNDING_OPEN_GATE = (0.75, 0.9)
 # Pre-latch soft cap: nasal-ish voiced frames cap openness before the event
 # state machine latches, so the continuous signal reacts within one hop.
 _NASAL_SOFT_CAP_OPENNESS = 0.2
@@ -193,6 +216,10 @@ class LipsyncDebugFrame:
         f2_bandwidth: Bandwidth of the F2 root in Hz (0.0 = no F2 this hop).
         f1_broad: Broad F1-band root used for mapping when the strict F1 slot
             is empty (0.0 = none).
+        f2_broad: Broad F2-band root used for mapping when the strict F2
+            slot is empty (0.0 = none).
+        f2_low: Lowest root above F1 from 500 Hz up, any bandwidth; the nasal
+            detector's murmur veto when at or below 1200 Hz (0.0 = none).
         pitch_hz: Raw pitch in Hz (0.0 when unvoiced).
         voiced: Whether the hop was classified voiced.
         clarity: Pitch-detector periodicity (NCC peak or residual clarity).
@@ -225,6 +252,8 @@ class LipsyncDebugFrame:
     f3: float
     f2_bandwidth: float
     f1_broad: float
+    f2_broad: float
+    f2_low: float
     pitch_hz: float
     voiced: bool
     clarity: float
@@ -588,21 +617,35 @@ class FormantLipsyncAnalyzer(BaseLipsyncAnalyzer):
                 f1 = formants.f1_broad
             else:
                 f1 = self._prev_f1
-            f2 = formants.f2 if f2_found else self._prev_f2
+            # A broad F2-band root fills the mapped F2 (rounding evidence)
+            # like f1_broad fills F1; the strict slot stays empty for
+            # adaptation, confidence and the debug tap.
+            f2_broad, f2_low = formants.f2_broad, formants.f2_low
+            if f2_found:
+                f2 = formants.f2
+            elif f2_broad > 0.0:
+                f2 = f2_broad
+            else:
+                f2 = self._prev_f2
+            f2_present = f2_found or f2_broad > 0.0
             f3 = formants.f3 if f3_found else self._prev_f3
             dark = low_ratio > _NASAL_DARK_RATIO
             f2_missing_damped = not f2_found and (
                 _NASAL_MISSING_F2_DAMPED == "always"
                 or (_NASAL_MISSING_F2_DAMPED == "dark" and dark)
             )
-            f2_damped = (
+            vowel_f2 = 0.0 < formants.f2_low <= _NASAL_VOWEL_F2_MAX_HZ
+            f2_damped = not vowel_f2 and (
                 f2_missing_damped
                 or formants.f2_bandwidth > _NASAL_F2_MAX_BANDWIDTH_HZ
                 or (dark and formants.f2 > _NASAL_SPURIOUS_F2_HZ)
             )
         else:
             f1_present = False
+            f2_present = False
+            f2_broad = f2_low = 0.0
             f2_damped = False
+            vowel_f2 = False
 
         # Bounded hold: after a few empty frames, drift a stale slot toward
         # its prior center instead of freezing an old shape indefinitely.
@@ -611,7 +654,7 @@ class FormantLipsyncAnalyzer(BaseLipsyncAnalyzer):
         # trajectory shape — adaptation is protected by spike rejection
         # instead.)
         f1 = self._bound_hold(0, f1, f1_present, self._f1_prior)
-        f2 = self._bound_hold(1, f2, f2_found, self._f2_prior)
+        f2 = self._bound_hold(1, f2, f2_present, self._f2_prior)
 
         # Adaptive normalization updates (voiced frames only; found slots only,
         # so held values never pollute the learned ranges).
@@ -629,8 +672,10 @@ class FormantLipsyncAnalyzer(BaseLipsyncAnalyzer):
             width = _clamp01((f2 - f2_lo) / (f2_hi - f2_lo + dsp.EPSILON))
             f2_mid = (f2_lo + f2_hi) / 2.0
             rounding = _clamp01((f2_mid - f2) / (f2_mid - f2_lo + dsp.EPSILON)) * (
-                _smoothstep(openness, 0.05, 0.15) * (1.0 - _smoothstep(openness, 0.75, 0.9))
+                1.0 - _smoothstep(openness, *_ROUNDING_OPEN_GATE)
             )
+            if vowel_f2:
+                openness = max(openness, _ROUNDED_VOWEL_MIN_OPENNESS)
         else:
             # Unvoiced speech (fricatives) decays toward neutral rather than
             # snapping shut; true silence rests nearly closed — otherwise the
@@ -661,7 +706,7 @@ class FormantLipsyncAnalyzer(BaseLipsyncAnalyzer):
             result,
         )
         if self._nasal_active:
-            openness = _NASAL_OPENNESS
+            openness = min(openness, _NASAL_OPENNESS_MAX)
         elif (
             voiced
             and f2_damped
@@ -716,6 +761,8 @@ class FormantLipsyncAnalyzer(BaseLipsyncAnalyzer):
                     f3=f3 if f3_found else 0.0,
                     f2_bandwidth=f2_bandwidth,
                     f1_broad=f1_broad,
+                    f2_broad=f2_broad,
+                    f2_low=f2_low,
                     pitch_hz=pitch_hz,
                     voiced=voiced,
                     clarity=clarity,

@@ -5,7 +5,9 @@ tell the depth of a well") contains no nasal at all, so its NASAL activity is
 pure false positive. Prints, per clip: NASAL events, the fraction of our-voiced
 hops with the nasal override active, and how the F2-damping evidence breaks
 down (no F2 / broad F2 / spurious high F2 on a dark frame) on hops that pass
-the spectral gates (centroid, low-band ratio).
+the spectral gates (centroid, low-band ratio), plus how many of those hops
+the back-vowel veto releases (a root at 500-1200 Hz above F1, any bandwidth:
+``f2_low`` in the debug tap; 2026-09-19).
 
 Run from server/:  uv run python ../plans/experiments/nasal_tap.py [--set analyzer._X=v ...]
 """
@@ -43,7 +45,7 @@ async def main():
     voice = voice_map["cartesia"][0]
     print(
         f"{'clip':18} {'true':>4} {'events':>6} {'active':>7} | gated hops: "
-        f"{'n':>4} {'noF2':>5} {'broad':>5} {'spur':>5} {'clean':>5}"
+        f"{'n':>4} {'noF2':>5} {'broad':>5} {'spur':>5} {'clean':>5} {'veto':>5}"
     )
     pools = {"hum": [], "other": []}
     for sentence in sentences:
@@ -66,12 +68,13 @@ async def main():
                 and d.f2 > fla._NASAL_SPURIOUS_F2_HZ
                 for d in gated
             )
+            vetoed = sum(0.0 < d.f2_low <= fla._NASAL_VOWEL_F2_MAX_HZ for d in gated)
             n_events = sum(e.kind == LipsyncEventKind.NASAL for e in events)
             active = np.mean([d.nasal_active for d in voiced]) if voiced else 0.0
             print(
                 f"{sentence.id + '/t' + str(take):18} {TRUE_NASALS[sentence.id]:>4} {n_events:>6} "
                 f"{active:>7.2f} | {'':11} {len(gated):>4} {no_f2:>5} {broad:>5} {spurious:>5} "
-                f"{len(gated) - no_f2 - broad - spurious:>5}"
+                f"{len(gated) - no_f2 - broad - spurious:>5} {vetoed:>5}"
             )
             pools["hum" if sentence.id == "nasal-hum" else "other"] += gated
 

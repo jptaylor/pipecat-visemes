@@ -107,7 +107,7 @@ npm --prefix client run dev   # viseme client on http://localhost:5173
 ## Tests
 
 ```bash
-cd server && uv run pytest    # 54 tests; ruff check . / ruff format . for lint
+cd server && uv run pytest    # 55 tests; ruff check . / ruff format . for lint
 ```
 
 ## Accuracy benchmark
@@ -123,7 +123,7 @@ Scores the analyzer against Praat reference tracks (L1 formant Hz with coverage,
 trajectory shape and timing lag) and corpus expectations (L3 events and duty-cycle guards)
 — see [plans/benchmark-harness-accuracy.md](plans/benchmark-harness-accuracy.md).
 Baselines are committed (`server/benchmarks/results/baseline.json` for the Cartesia voice,
-composite 87.5; `baseline-deepgram.json`, 90.7) so `--compare` reads +0.0 on a clean
+composite 87.5; `baseline-deepgram.json`, 92.0) so `--compare` reads +0.0 on a clean
 checkout once the fixtures exist; fixtures themselves are not committed. While tuning,
 `--set dsp.LPC_ORDER=14` overrides any `dsp`/`analyzer` constant for one run and `--tag`
 names the results file; `plans/experiments/ab_table.py` runs whole A/B ladders.

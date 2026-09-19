@@ -335,6 +335,39 @@ class TestFormantLipsyncAnalyzer(unittest.IsolatedAsyncioTestCase):
         openness = [k.openness for k in keyframes if k.offset > 0.1]
         self.assertLessEqual(float(np.percentile(openness, 90)), 0.25)
 
+    async def test_back_vowel_with_broad_f2_is_not_a_murmur(self):
+        # A /u/ whose F2 root is too broad for the strict formant cap used to
+        # read as "no F2" and hence as a nasal murmur (mouth forced shut,
+        # rounding lost). The low root above F1 vetoes that reading, stands in
+        # for F2 in the mapping, and keeps a small opening.
+        pcm = np.concatenate(
+            [
+                synth_vowel(700, 1200, secs=0.5),
+                synth_vowel(300, 800, secs=0.6, bandwidths=(90, 600, 150)),
+                synth_vowel(300, 2300, secs=0.5),
+            ]
+        )
+        analyzer = FormantLipsyncAnalyzer(collect_debug=True)
+        await analyzer.start(ANALYSIS_SAMPLE_RATE)
+        keyframes, events, _ = await run_analyzer(pcm, analyzer=analyzer)
+
+        in_u = lambda offset: 0.6 <= offset <= 1.05  # noqa: E731
+        self.assertFalse([e for e in events if e.kind == LipsyncEventKind.NASAL and in_u(e.offset)])
+        u_keyframes = [k for k in keyframes if in_u(k.offset)]
+        self.assertTrue(u_keyframes)
+        self.assertGreaterEqual(float(np.mean([k.openness for k in u_keyframes])), 0.1)
+        self.assertGreater(float(np.mean([k.rounding for k in u_keyframes])), 0.5)
+        a_keyframes = [k for k in keyframes if 0.15 <= k.offset <= 0.45]
+        self.assertGreater(
+            float(np.mean([k.rounding for k in u_keyframes])),
+            float(np.mean([k.rounding for k in a_keyframes])),
+        )
+        # The veto root is what the debug tap reports on the /u/ hops.
+        u_hops = [d for d in analyzer.debug_features if in_u(d.offset) and d.voiced]
+        self.assertTrue(u_hops)
+        vetoed = sum(0.0 < d.f2_low <= 1200.0 for d in u_hops)
+        self.assertGreater(vetoed, 0.8 * len(u_hops))
+
     async def test_silence_event_once(self):
         pcm = np.concatenate(
             [synth_vowel(700, 1200, secs=0.4), np.zeros(ANALYSIS_SAMPLE_RATE, dtype=np.float32)]

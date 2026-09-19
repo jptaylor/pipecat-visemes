@@ -29,21 +29,20 @@ project stays a standalone example app; it is not being upstreamed into pipecat 
 
 ## Where it stands
 
-Baselines committed 2026-09-18 (`server/benchmarks/results/baseline*.json`), 12 sentences × 2
+Baselines committed 2026-09-19 (`server/benchmarks/results/baseline*.json`), 12 sentences × 2
 takes per voice, scored against Praat and the corpus expectations:
 
 | | Cartesia (`71a7ad14…`) | Deepgram (`aura-2-helena-en`) |
 |---|---|---|
-| composite (v1 + nasal guards) | **87.5** | **90.7** |
-| f1_mae / f2_mae (Hz, committed hops) | 24 / 112 | 24 / 75 |
-| openness_r / width_r vs Praat | 0.65 / 0.56 | 0.69 / 0.77 |
+| composite (v1 + nasal guards) | **87.5** | **92.0** |
+| f1_mae / f2_mae (Hz, committed hops) | 24 / 113 | 24 / 75 |
+| openness_r / width_r vs Praat | 0.62 / 0.57 | 0.74 / 0.79 |
 | voicing agreement with Praat | 0.95 | 0.85 |
 | conditioning lag (per-stage) | +4 ms | +10 ms |
-| keyframes / s | 28.5 | 31.4 |
-| nasal-override duty on voiced hops | 0.32 | 0.21 |
-| corpus checks | 27/28 | 26/28 |
+| keyframes / s | 29.7 | 31.1 |
+| corpus checks | 31/32 | 30/32 |
 
-CPU: ~185 µs per hop (RTF ≈ 0.009). Tests: 54 (`server/tests/`, including the eval recorder's replay and the delivery schedule). Before the September work the same corpus read
+CPU: ~185 µs per hop (RTF ≈ 0.009). Tests: 55 (`server/tests/`, including the eval recorder's replay, the delivery schedule and a synthetic back vowel that must not read as a murmur). Before the September work the same corpus read
 70.9 / 85.6.
 
 What got it there, all in [deep-review-2026-09-results.md](deep-review-2026-09-results.md):
@@ -51,11 +50,17 @@ LPC order 16, an F2/F3 slot prior, normalized-cross-correlation voicing on a sep
 frame (the largest single win: coverage of Praat-voiced hops doubled on Cartesia), zero-phase
 conditioning with a 0.4/hop slew (the trailing median had been ~35 ms late and cost 0.20 of
 openness correlation), and a 2-hop nasal entry. The harness gained coverage, lag, jitter and
-nasal-duty metrics and `--set`/`--tag`/`--ceiling` for A/B runs.
+nasal-duty metrics and `--set`/`--tag`/`--ceiling` for A/B runs. A third pass on 2026-09-19 (the
+Eval tab showed the mouth shut through every /u/ of "Soon the new moon grew blue…") added a
+back-vowel veto to the nasal detector — a root at 500–1200 Hz above F1, however broad, is a
+vowel's F2, not a murmur's — an F1 cap of 350 Hz for nasalized vowels, an openness cap of 0.15
+in place of the forced-shut override, rounding no longer gated off for small openings, and
+nasal-duty guards on the vowel sentences; Deepgram 90.7 → 92.0, Cartesia unchanged at 87.5 with
+four more checks passing.
 
-Accepted residuals: Cartesia harvard-02/t2 nasal duty 0.41 against the 0.30 bar (a dark
-sentence); Deepgram nasal-hum openness p90 0.29 against 0.30 (the breathy "H" onset); Deepgram
-pause-probe has no 300 ms silence (that voice's pause is shorter).
+Accepted residuals: Cartesia vowel-oo/t2 nasal duty 0.454 against the 0.45 bar; Deepgram
+nasal-hum openness p90 0.29 against 0.30 (the breathy "H" onset); Deepgram pause-probe has no
+300 ms silence (that voice's pause is shorter).
 
 Tooling since the baselines (2026-09-19): the **eval recorder** (`server/benchmarks/record.py`,
 `eval_corpus.yaml`, 19 lines; `tests/test_eval_record.py`) speaks the corpus through the real output path — `LipsyncProcessor`,
@@ -121,10 +126,11 @@ sections, where each item is worked out in detail. Every runtime change is gated
 `uv run python -m benchmarks.accuracy --offline --compare` on **both** providers; timing changes
 are measured with the eval recorder (`--reanalyze` on the same audio) before and after.
 
-1. **NASAL event semantics.** The override also latches on dark voiced consonants (ð, /w l/,
-   voice bars) — spectrally murmurs, mouth nearly closed, so the aperture is right but the label is
-   wrong. F1 cap, mid-band ratio and run length do not separate them (measured, both voices). It
-   needs a place cue or a broader name ("dark voiced closure") before clients style it.
+1. **NASAL event semantics.** Back vowels no longer read as murmurs (2026-09-19 veto), but the
+   override still latches on dark voiced consonants (ð, /w l/, voice bars) — spectrally murmurs,
+   mouth nearly closed, so the aperture is right but the label is wrong (harvard-03 duty
+   0.09–0.15). It needs a place cue or a broader name ("dark voiced closure") before clients style
+   it. Rounding is F2-only and marks any low-F2 vowel (/ɑ ɔ/) as rounded ([ROUND-1]).
 2. **Keyframe economy.** 28–31/s against the 25/s guard. The dead band is a constructor default
    the harness cannot sweep; expose it to `--set`, then decide.
 3. **[CONS-1] Energy-gated closures.** The mouth should close with the energy dip instead of only

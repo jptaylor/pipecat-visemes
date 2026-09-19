@@ -25,12 +25,16 @@ sentences:
     expect: { openness_p90_min: 0.72 } # oracle 0.899 / 0.900
   - id: vowel-ee
     text: "See the green trees? Please believe me, these seeds are free."
-    tags: [vowel-probe]
-    expect: { width_p90_min: 0.77 } # oracle 0.961 / 0.989
+    tags: [vowel-probe, nasal-guard]
+    # Two nasals (green, me); /i/ must not read as a murmur either.
+    expect: { width_p90_min: 0.77, nasal_fraction_max: 0.30 } # oracle 0.961 / 0.989
   - id: vowel-oo
     text: "Soon the new moon grew blue, and the room felt cool."
-    tags: [vowel-probe]
-    expect: { rounding_p90_min: 0.37 } # oracle 0.593 / 0.467
+    tags: [vowel-probe, nasal-guard]
+    # Six nasals (soon, new, moon x2, and, room) and the vowels between them
+    # are nasalized: nasal or nasalized ~0.45 of voiced time. The bar catches
+    # the /u/ vowels themselves reading as murmurs (2026-09-19: 0.53-0.62).
+    expect: { rounding_p90_min: 0.37, nasal_fraction_max: 0.45 } # oracle 0.593 / 0.467
   - id: bilabial-mama
     text: "Mama made more mashed potatoes for my mother."
     tags: [events]

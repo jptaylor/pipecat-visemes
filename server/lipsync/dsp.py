@@ -80,6 +80,18 @@ _F3_MIN_ABOVE_F2_HZ = 200.0
 # mapping, never a formant measurement (slots, adaptation and accuracy
 # scoring stay on strict-bandwidth roots).
 _F1_BROAD_MAX_BANDWIDTH_HZ = 800.0
+# A back/rounded vowel's F2 (650-1000 Hz) likewise comes out of the LPC fit
+# as a broad root on real TTS speech (400-1000 Hz bandwidth measured on /u/),
+# beyond the strict cap. When the F2 slot is empty, the lowest such root in
+# the F2 band is reported as ``f2_broad``: rounding evidence for the mapping
+# and a murmur veto for the nasal detector, never a formant measurement.
+_F2_BROAD_MAX_BANDWIDTH_HZ = 1000.0
+# ``f2_low``: the lowest root above F1 from this frequency up, of any
+# bandwidth up to ``_F2_BROAD_MAX_BANDWIDTH_HZ``, whichever root won the F2
+# slot. A back vowel always has one (its F2, 500-1000 Hz on the corpus
+# voices); a nasal murmur has none, so the nasal detector uses it as a veto.
+# Below the slot band's edge on purpose: some voices' /u/ sits under 650 Hz.
+_F2_LOW_ROOT_MIN_HZ = 500.0
 
 # Pitch search range and voicing clarity threshold.
 PITCH_MIN_HZ = 60
@@ -149,6 +161,14 @@ class FormantEstimate(NamedTuple):
             strict formant cap and ``_F1_BROAD_MAX_BANDWIDTH_HZ``) present
             when the F1 slot is empty; 0.0 otherwise. Openness evidence for
             mapping — not a formant measurement.
+        f2_broad: Frequency of the lowest broad F2-band root (bandwidth
+            between the strict cap and ``_F2_BROAD_MAX_BANDWIDTH_HZ``, above
+            F1) present when the F2 slot is empty; 0.0 otherwise. Rounding
+            evidence — not a formant measurement.
+        f2_low: Frequency of the lowest root above F1 from
+            ``_F2_LOW_ROOT_MIN_HZ`` up, of any bandwidth up to
+            ``_F2_BROAD_MAX_BANDWIDTH_HZ``, whichever root filled the F2
+            slot; 0.0 if none. The nasal detector's murmur veto.
     """
 
     f1: float
@@ -157,6 +177,8 @@ class FormantEstimate(NamedTuple):
     plausible: bool
     f2_bandwidth: float = 0.0
     f1_broad: float = 0.0
+    f2_broad: float = 0.0
+    f2_low: float = 0.0
 
 
 class LpcResult(NamedTuple):
@@ -342,7 +364,7 @@ def lpc_formants(
         if mag <= EPSILON:
             continue
         bandwidth = -(ANALYSIS_SAMPLE_RATE / np.pi) * np.log(mag)
-        if not 0.0 < bandwidth <= _F1_BROAD_MAX_BANDWIDTH_HZ:
+        if not 0.0 < bandwidth <= max(_F1_BROAD_MAX_BANDWIDTH_HZ, _F2_BROAD_MAX_BANDWIDTH_HZ):
             continue
         freq = np.arctan2(root.imag, root.real) * ANALYSIS_SAMPLE_RATE / _TWO_PI
         if FORMANT_MIN_HZ <= freq <= FORMANT_MAX_HZ:
@@ -361,11 +383,32 @@ def lpc_formants(
         broad = [
             f
             for f, bw in candidates
-            if F1_BAND_HZ[0] <= f <= F1_BAND_HZ[1] and bw > FORMANT_MAX_BANDWIDTH_HZ
+            if F1_BAND_HZ[0] <= f <= F1_BAND_HZ[1]
+            and FORMANT_MAX_BANDWIDTH_HZ < bw <= _F1_BROAD_MAX_BANDWIDTH_HZ
         ]
         if broad:
             f1_broad = min(broad, key=lambda f: abs(f - targets[0]))
-    return FormantEstimate(f1, f2, f3, f1 > 0.0 and f2 > 0.0, f2_bandwidth, f1_broad)
+    above = (f1 if f1 > 0.0 else f1_broad) + _F2_MIN_ABOVE_F1_HZ
+    f2_broad = 0.0
+    if f2 == 0.0:
+        broad = [
+            f
+            for f, bw in candidates
+            if F2_BAND_HZ[0] <= f <= F2_BAND_HZ[1]
+            and f > above
+            and FORMANT_MAX_BANDWIDTH_HZ < bw <= _F2_BROAD_MAX_BANDWIDTH_HZ
+        ]
+        if broad:
+            f2_broad = min(broad)
+    low = [
+        f
+        for f, bw in candidates
+        if f >= _F2_LOW_ROOT_MIN_HZ and f > above and bw <= _F2_BROAD_MAX_BANDWIDTH_HZ
+    ]
+    f2_low = min(low) if low else 0.0
+    return FormantEstimate(
+        f1, f2, f3, f1 > 0.0 and f2 > 0.0, f2_bandwidth, f1_broad, f2_broad, f2_low
+    )
 
 
 def lpc_residual_pitch(frame: np.ndarray, lpc: np.ndarray) -> PitchEstimate:
