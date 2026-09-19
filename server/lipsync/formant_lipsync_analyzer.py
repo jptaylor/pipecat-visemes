@@ -40,6 +40,30 @@ _NEUTRAL = 0.35
 _SILENCE_REST_OPENNESS = 0.15
 _UNVOICED_DECAY = 0.8
 
+# Utterance end. Audio simply stops at a turn end: there is no trailing
+# silence to decay through, the unvoiced decay (a factor of _UNVOICED_DECAY
+# per hop, ~15 hops to reach rest) is cut off wherever the last sample falls,
+# and SILENCE needs _SILENCE_EVENT_HOPS of sub-threshold audio it never gets.
+# The last measured keyframe is therefore mid-decay with the mouth still open
+# — measured 0.45 openness on an /a/ with 80 ms of trailing silence — and the
+# client, having no keyframe after it, holds that pose and eases out over
+# roughly a second. So the analyzer states the ending explicitly: one rest
+# keyframe this far past the last analyzed hop, which the client interpolates
+# into and which matches the pose it falls back to, so nothing moves after it.
+# Kept well inside the client's cut() grace window (CUT_GRACE_SEC, 150 ms in
+# feed.ts) so a natural turn end does not discard it; raising one means
+# raising the other.
+_UTTERANCE_CLOSE_SEC = 0.1
+# The pose the mouth closes to: what the unvoiced decay above converges to
+# once the energy is under the silence gate, so a clip that already ended at
+# rest is recognised as such and gets no extra keyframe. (The client's own
+# REST_POSE fallback in feed.ts agrees on openness and width but rests
+# rounding at 0.1 rather than _NEUTRAL; on a mouth this closed the difference
+# is not visible, but the two should be reconciled.)
+_REST_POSE = (_SILENCE_REST_OPENNESS, _NEUTRAL, _NEUTRAL)
+# Below this much movement the mouth is already at rest; no keyframe needed.
+_REST_EPSILON = 0.02
+
 # Generic formant priors (Hz); shifted up for high-pitched voices.
 _F1_PRIOR = (250.0, 900.0)
 _F2_PRIOR = (800.0, 2500.0)
@@ -469,6 +493,7 @@ class FormantLipsyncAnalyzer(BaseLipsyncAnalyzer):
             self._buf_len += self._pad
         self._drain(result)
         self._flush_conditioning(result)
+        self._emit_rest_keyframe(result)
         # Everything ingested is final: tail discarded, pending closures dead.
         result.processed_up_to = self._hops * HOP_SECONDS + EVENT_FINALIZE_HORIZON_SEC
         self._reset_utterance_state()
@@ -1137,6 +1162,30 @@ class FormantLipsyncAnalyzer(BaseLipsyncAnalyzer):
             ):
                 self._emit_keyframe(anchor, result)
         self._emit_keyframe(hop, result)
+
+    def _emit_rest_keyframe(self, result: LipsyncFrameResult):
+        """Close the mouth at the end of an utterance (see _UTTERANCE_CLOSE_SEC).
+
+        Only from ``flush()``, the clean end of a TTS context: an interruption
+        goes through ``reset()`` instead, where the client's own cut decides
+        the pose and forcing it shut would fight it.
+        """
+        last = self._last_emitted
+        if last is None:
+            return  # Nothing was emitted; there is no open mouth to close.
+        if max(abs(last[i] - _REST_POSE[i]) for i in range(3)) <= _REST_EPSILON:
+            return  # Already at rest.
+        result.keyframes.append(
+            LipsyncKeyframe(
+                offset=self._hops * HOP_SECONDS + _UTTERANCE_CLOSE_SEC,
+                openness=_REST_POSE[0],
+                width=_REST_POSE[1],
+                rounding=_REST_POSE[2],
+                energy=0.0,
+                pitch=0.0,
+                confidence=0.0,
+            )
+        )
 
     def _emit_keyframe(self, hop: _PendingHop, result: LipsyncFrameResult):
         self._last_emitted = hop.params

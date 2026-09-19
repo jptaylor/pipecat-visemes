@@ -23,7 +23,12 @@ from lipsync.dsp import (
     rms_energy,
     spectral_nasal_features,
 )
-from lipsync.formant_lipsync_analyzer import FormantLipsyncAnalyzer
+from lipsync.formant_lipsync_analyzer import (
+    _SILENCE_REST_OPENNESS,
+    _UTTERANCE_CLOSE_SEC,
+    HOP_SECONDS,
+    FormantLipsyncAnalyzer,
+)
 from lipsync.types import LipsyncEventKind
 from tests.synth import synth_vowel
 
@@ -407,6 +412,55 @@ class TestFormantLipsyncAnalyzer(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(any(e.kind == LipsyncEventKind.SILENCE for e in events))
         # After the silence event fires (~0.8 s) no heartbeat keyframes.
         self.assertEqual([k.offset for k in keyframes if k.offset > 1.0], [])
+
+    async def test_utterance_ends_with_the_mouth_closed(self):
+        # Audio stops at a turn end with the mouth still open: the unvoiced
+        # decay never reaches rest and SILENCE never fires, so without a
+        # closing keyframe the client holds the open pose and eases out over
+        # about a second.
+        pcm = np.concatenate(
+            [
+                synth_vowel(730, 1090, secs=1.2) * 0.5,  # /a/, wide open
+                np.zeros(int(0.08 * ANALYSIS_SAMPLE_RATE), dtype=np.float32),
+            ]
+        )
+        keyframes, events, _ = await run_analyzer(pcm)
+        self.assertFalse(any(e.kind == LipsyncEventKind.SILENCE for e in events))
+        audio_end = len(pcm) / ANALYSIS_SAMPLE_RATE
+
+        last = keyframes[-1]
+        self.assertAlmostEqual(last.openness, _SILENCE_REST_OPENNESS, places=6)
+        self.assertGreater(last.offset, audio_end - HOP_SECONDS)
+        # Inside the client's cut() grace, or a natural turn end drops it.
+        self.assertLessEqual(last.offset - audio_end, _UTTERANCE_CLOSE_SEC + HOP_SECONDS)
+        # The mouth really was open before it: this is a close, not a no-op.
+        self.assertGreater(keyframes[-2].openness, 0.3)
+
+    async def test_no_closing_keyframe_when_already_at_rest(self):
+        # A clip with enough trailing silence decays to rest on its own; the
+        # closing keyframe would be redundant wire traffic.
+        pcm = np.concatenate(
+            [
+                synth_vowel(700, 1200, secs=0.5),
+                np.zeros(int(1.2 * ANALYSIS_SAMPLE_RATE), dtype=np.float32),
+            ]
+        )
+        keyframes, _, _ = await run_analyzer(pcm)
+        audio_end = len(pcm) / ANALYSIS_SAMPLE_RATE
+        self.assertEqual([k.offset for k in keyframes if k.offset > audio_end], [])
+
+    async def test_interruption_does_not_close_the_mouth(self):
+        # reset(), not flush(): on barge-in the client's own cut() decides the
+        # pose, and a forced close from the server would fight it.
+        analyzer = FormantLipsyncAnalyzer()
+        await analyzer.start(ANALYSIS_SAMPLE_RATE)
+        context = LipsyncAnalysisContext(context_id="test", sample_rate=ANALYSIS_SAMPLE_RATE)
+        pcm = synth_vowel(730, 1090, secs=0.6) * 0.5
+        for i in range(0, len(pcm), 320):
+            await analyzer.analyze(pcm[i : i + 320], context)
+        await analyzer.reset()
+        result = await analyzer.flush(context)
+        self.assertEqual(result.keyframes, [])
 
     async def test_analyzer_chunk_invariance(self):
         pcm = synth_vowel(700, 1200, secs=1.0)

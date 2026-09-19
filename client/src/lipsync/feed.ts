@@ -29,7 +29,11 @@ const PREROLL_SEC = 0.2; // blend rest -> first keyframe over this window
 const PRUNE_HORIZON_SEC = 30; // drop keyframes this far behind the playhead
 const RATE_WINDOW_MS = 5000; // sliding window for msg/s + kf/s rates
 const MIN_EVENT_ACTIVE_SEC = 0.25; // floor so zero-duration events still flash
-const CUT_GRACE_SEC = 0.15; // motion kept past the playhead on cut(): covers the client's own audio latency
+// Motion kept past the playhead on cut(): covers the client's own audio latency, and
+// must stay above the server's _UTTERANCE_CLOSE_SEC (0.1 s) — the rest keyframe that
+// closes the mouth sits that far past the last analyzed hop, so a shorter grace would
+// discard it at a natural turn end and leave the mouth open through the ease below.
+const CUT_GRACE_SEC = 0.15;
 
 export interface ArticulationSample {
   openness: number;
