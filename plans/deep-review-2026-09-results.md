@@ -215,3 +215,67 @@ Cartesia (the F1 cap releases hum hops with F1 above 350 Hz); rounding is F2-onl
 vowel (/ɑ ɔ/ in "calm", "walked") reads as rounded (vowel-aa rounding p90 0.73) — [ROUND-1]; the
 NASAL label still latches on dark voiced consonants (harvard-03 duty 0.09–0.15).
 
+---
+
+## Fourth pass (2026-09-19): seven Cartesia voices
+
+Every pass so far had tuned on one Cartesia voice and checked on one Deepgram voice. Six
+library voices were added to the corpus (three masculine, three feminine; ids and pitches in
+`corpus.yaml`), fixtures synthesized (144 clips), and the Praat ceiling set by pitch: ~100 Hz
+voices get 4500 (5000 read their F2 ~30 Hz worse and openness_r 0.03–0.09 lower), ~160 Hz
+voices 5500. The harness's `--voices` now keeps the corpus ceilings (it hard-coded 5500).
+
+| voice | f0 | first run | landed | what still fails |
+|---|---|---|---|---|
+| quickstart | 172 Hz | 87.5 | 87.4 | vowel-oo/t2 nasal duty (0.454 vs 0.45) |
+| Gemma (f, British) | 163 | 88.7 | 93.6 | hum: no NASAL event, t1 openness |
+| Archie (m, British) | 99 | 83.2 | 88.7 | hum: no NASAL event, t2 openness |
+| Jolene (f, Southern) | 154 | 83.9 | 86.1 | hum t1 openness; pauses |
+| Skylar (f) | 170 | 81.8 | 84.3 | one pause |
+| Daniel (m) | 110 | 78.0 | 82.3 | hum: no NASAL event; mama/t1 one closure; one pause |
+| Ronald (m, deep) | 111 | 77.3 | 79.8 | hum: no NASAL event; pauses; vowel-aa/t2 openness peak |
+| **pooled** | | 82.9 | **86.0** | 204/224 checks |
+
+**What generalized:** the vowel tracking. F1 error 14–49 Hz, coverage 0.70–0.88 (F1) and
+0.69–0.84 (F2), voicing agreement 0.90–0.95, openness_r 0.59–0.70, width_r 0.56–0.76, 27–31
+keyframes/s — the same band as the two tuning voices. The back-vowel veto of the third pass
+changes nothing on the new voices (identical with it off).
+
+**What did not, and what was done:**
+
+- **Silence.** The SILENCE event needed 300 ms; mid-sentence pauses run 235–430 ms by intensity
+  and less under the silence gate, so the pause probe passed on one voice in seven. Ladder
+  (hops of 20 ms): 15 → 2/14 takes, 12 → 3/14, 10 → 8/14, 8 → 10/14 with spurious events
+  appearing on the balanced sentences at 8. Landed `_SILENCE_EVENT_HOPS = 10` (200 ms):
+  pooled 82.9 → 85.1, keyframe rate and openness_r unchanged. Keyframes already rest the mouth
+  in a pause; the event is informational.
+- **Closures on "Mama made more mashed potatoes".** Deep voices dip little at /m/ (Ronald,
+  Daniel, Jolene: 1–4 closures against a bar of 4). Raising `_CLOSURE_PEAK_FRACTION` makes it
+  worse (0.30: fewer closures, because longer low runs exceed the 250 ms cap and fewer hops
+  count as confirming speech); lowering it re-opens the voice-bar misses of 2026-07. The bar is
+  now 2 (no dips at all is the gross failure); closing the mouth on /m/ is the nasal detector's
+  job, not an energy dip's.
+- **Nasal murmurs.** The hum probe got no NASAL event on Ronald, Archie, Daniel and Gemma and the
+  mouth opened (p90 0.38–0.90). Their hums are not dark: on the pre-emphasized spectrum the
+  centroid is 1.1–3 kHz and the low-band ratio 0.10–0.35 (gates: < 1 kHz, > 0.6), and relative
+  to each voice's own vowels the hum sits at the median brightness, so no darkness cue, absolute
+  or adaptive, can work. A feature study over all seven voices (pre-emphasized and raw centroid
+  and band ratios, mid-band hollowness, F1, F1 presence, F2 band and bandwidth, NCC clarity,
+  prediction gain, level) found no single-frame cue that separates murmur hops from vowel hops
+  across voices; "voiced with no F1 at all" is the best and holds on four voices only (hum hops
+  0.54–0.62 vs vowels 0.07–0.19; Jolene, Gemma and Skylar find an F1 of 300–400 Hz in their
+  hums). Praat itself reads F1 above 1 kHz on 20–50 % of the Ronald and Gemma hum hops: those
+  voices render "Hmm" partly as an open voiced sound, which the openness bar cannot admit.
+  What did land is the failure mode's fix: a stale F1 used to drift toward the prior's center
+  (`_bound_hold`), which opened the mouth half-way during a hum with no findable F1; it now
+  drifts toward the low edge (`_F1_HOLD_DRIFT = 0.0`) — a voiced frame with no F1 is a murmur
+  or a close vowel far more often than a mid vowel. Hum openness p90: Ronald 0.38/0.24 →
+  0.05/0.04, Daniel 0.44/0.22 → 0.10/0.10, Archie t1 0.47 → 0.29, at no cost elsewhere
+  (openness_r 0.65 → 0.64 pooled, F1 error unchanged).
+
+**Residuals:** NASAL events on bright/breathy murmurs (four voices; the label, not the
+aperture, on three of them now); hum takes whose audio has a vowel-like F1 (Archie t2, Jolene
+t1, Gemma t1); pauses under 200 ms on four takes; Daniel's mama take with one dip; Ronald's
+vowel-aa/t2 openness peak 0.70 against 0.72. Deepgram re-baselined at 91.9 (−0.1 from the
+silence and hold changes).
+

@@ -74,7 +74,11 @@ _LOG_COMPRESSION = 9.0
 # Silence: sustained sub-threshold energy emits one SILENCE event.
 _SILENCE_FLOOR_MULT = 2.5
 _SILENCE_ABS = 1e-4
-_SILENCE_EVENT_HOPS = 15  # 300 ms
+# 200 ms: measured across seven TTS voices, mid-sentence pauses run 235-430 ms
+# by intensity but shorter under the silence gate; at 300 ms the pause probe
+# fired on one voice in seven, at 200 ms on most, with no spurious events on
+# the phonetically balanced sentences (160 ms starts adding them).
+_SILENCE_EVENT_HOPS = 10
 
 # Closure (M/B/P): a short, bounded energy dip inside a speech region.
 _CLOSURE_FLOOR_MULT = 3.0
@@ -176,6 +180,12 @@ _ANCHOR_KEYFRAMES = False
 # a spike when feeding the adaptive estimators.
 _HOLD_MAX_HOPS = 3
 _HOLD_DECAY = 0.1
+# Where a stale F1 drifts: 0.0 = the prior's low edge (a voiced frame with no
+# findable F1, strict or broad, is a murmur or a close vowel far more often
+# than a mid vowel — measured across seven voices, hums lack F1 on 60-73 % of
+# their hops on four of them while vowels lack it on 5-21 %), 0.5 = the prior
+# center (the 2026-07 behaviour, which opened the mouth half-way during hums).
+_F1_HOLD_DRIFT = 0.0
 _ADAPT_SPIKE_HZ = 400.0
 _ADAPT_MAX_SKIPS = 2
 
@@ -804,8 +814,9 @@ class FormantLipsyncAnalyzer(BaseLipsyncAnalyzer):
             return value
         self._hold_counts[slot] += 1
         if self._hold_counts[slot] > _HOLD_MAX_HOPS and value > 0.0:
-            center = (prior[0] + prior[1]) / 2.0
-            return value + (center - value) * _HOLD_DECAY
+            drift = _F1_HOLD_DRIFT if slot == 0 else 0.5
+            target = prior[0] + (prior[1] - prior[0]) * drift
+            return value + (target - value) * _HOLD_DECAY
         return value
 
     def _window_frames(self, lpc_raw: np.ndarray, prev_sample: float):

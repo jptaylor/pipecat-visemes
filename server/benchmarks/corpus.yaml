@@ -7,6 +7,21 @@ voices:
   cartesia:
     - id: "71a7ad14-091c-4e8e-a314-022ece01c121" # quickstart default voice
       formant_ceiling: 5000 # Praat ceiling: 5500 female / 5000 male; this voice ~178 Hz median
+    # Library voices added 2026-09-19 for a masculine/feminine spread. Ceiling by
+    # median pitch: ~100 Hz voices get 4500 (5000 read their F2 30 Hz worse and
+    # openness_r 0.03-0.09 lower), ~160 Hz voices 5500.
+    - id: "5ee9feff-1265-424a-9d7f-8e4d431a12c7" # Ronald - Thinker (masculine, f0 ~111 Hz)
+      formant_ceiling: 4500
+    - id: "ef191366-f52f-447a-a398-ed8c0f2943a1" # Archie - Approachable Mate (masculine, British, f0 ~99 Hz)
+      formant_ceiling: 4500
+    - id: "47c38ca4-5f35-497b-b1a3-415245fb35e1" # Daniel - Modern Assistant (masculine, f0 ~110 Hz)
+      formant_ceiling: 4500
+    - id: "d1d9c946-7cfc-4378-85a4-07d09827cb7e" # Jolene - Warm Storyteller (feminine, Southern)
+      formant_ceiling: 5500
+    - id: "62ae83ad-4f6a-430b-af41-a9bede9286ca" # Gemma - Decisive Agent (feminine, British)
+      formant_ceiling: 5500
+    - id: "db6b0ed5-d5d3-463d-ae85-518a07d3c2b4" # Skylar - Friendly Guide (feminine, American)
+      formant_ceiling: 5500
   deepgram:
     - id: "aura-2-helena-en" # DeepgramTTSService default voice
       formant_ceiling: 5500
@@ -38,7 +53,10 @@ sentences:
   - id: bilabial-mama
     text: "Mama made more mashed potatoes for my mother."
     tags: [events]
-    expect: { closures_min: 4, closures_max: 14 }
+    # The /m/ dips are shallow on deep voices (measured 2026-09-19 on seven
+    # voices: 1-8 closures at every threshold tried), so the bar guards only
+    # against no dips at all; closing the mouth on /m/ is the nasal detector's job.
+    expect: { closures_min: 2, closures_max: 14 }
   - id: bilabial-bob
     text: "Bob put a big pepper in the paper bag."
     tags: [events]

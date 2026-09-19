@@ -598,7 +598,11 @@ async def run(args) -> dict:
         sentences = [s for s in sentences if s.id in wanted]
     voices = voice_map.get(args.provider, [])
     if args.voices:
-        voices = [Voice(args.provider, vid, 5500) for vid in args.voices.split(",")]
+        # Keep the corpus ceiling for known voices; 5500 for ad-hoc ones.
+        known = {v.id: v for v in voices}
+        voices = [
+            known.get(vid) or Voice(args.provider, vid, 5500) for vid in args.voices.split(",")
+        ]
     if not voices:
         raise SystemExit(f"no voices configured for provider {args.provider}")
     if args.ceiling:

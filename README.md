@@ -38,7 +38,7 @@ hop (about 1 % of one core per bot).
 | `server/lipsync/`    | The lipsync package: types, vendored DSP (LPC/Levinson, formants, pitch, P² quantiles), formant analyzer, `LipsyncProcessor`, app-local frames, RTVI server-message relay |
 | `server/bot.py`      | Official `pipecat init quickstart` starter bot with the lipsync processor + relay wired in                                                                                         |
 | `server/tests/`      | Unit tests (DSP, analyzer, processor, relay, end-to-end through a headless output transport)                                                                                       |
-| `server/benchmarks/` | Accuracy harness (Praat reference + designed corpus, two provider voices, committed baselines) and the recorder behind the client's Eval tab                                       |
+| `server/benchmarks/` | Accuracy harness (Praat reference + designed corpus, seven Cartesia voices and a Deepgram voice, committed baselines) and the recorder behind the client's Eval tab           |
 | `client/`            | Vite + React web client: a Live tab (SmallWebRTC to the bot, animated mouth with timing/event inspectors) and an Eval tab that replays recorded clips                              |
 | `plans/`             | Plan of record ([plans/README.md](plans/README.md)): status, findings, what is and is not planned; the specification, tuning/review notes and experiment scripts behind them        |
 
@@ -114,7 +114,7 @@ cd server && uv run pytest    # 55 tests; ruff check . / ruff format . for lint
 
 ```bash
 cd server
-uv run python -m benchmarks.accuracy                      # first run synthesizes fixtures (CARTESIA_API_KEY)
+uv run python -m benchmarks.accuracy                      # first run synthesizes fixtures for seven voices, ~3 min (CARTESIA_API_KEY)
 uv run python -m benchmarks.accuracy --offline --compare  # free re-score vs the committed baseline
 uv run python -m benchmarks.accuracy --provider deepgram --offline --compare   # second voice (DEEPGRAM_API_KEY once)
 ```
@@ -122,8 +122,8 @@ uv run python -m benchmarks.accuracy --provider deepgram --offline --compare   #
 Scores the analyzer against Praat reference tracks (L1 formant Hz with coverage, L2
 trajectory shape and timing lag) and corpus expectations (L3 events and duty-cycle guards)
 — see [plans/benchmark-harness-accuracy.md](plans/benchmark-harness-accuracy.md).
-Baselines are committed (`server/benchmarks/results/baseline.json` for the Cartesia voice,
-composite 87.5; `baseline-deepgram.json`, 92.0) so `--compare` reads +0.0 on a clean
+Baselines are committed (`server/benchmarks/results/baseline.json`, composite 86.0 pooled over
+seven Cartesia voices, 80–94 per voice; `baseline-deepgram.json`, 91.9) so `--compare` reads +0.0 on a clean
 checkout once the fixtures exist; fixtures themselves are not committed. While tuning,
 `--set dsp.LPC_ORDER=14` overrides any `dsp`/`analyzer` constant for one run and `--tag`
 names the results file; `plans/experiments/ab_table.py` runs whole A/B ladders.

@@ -30,17 +30,20 @@ project stays a standalone example app; it is not being upstreamed into pipecat 
 ## Where it stands
 
 Baselines committed 2026-09-19 (`server/benchmarks/results/baseline*.json`), 12 sentences × 2
-takes per voice, scored against Praat and the corpus expectations:
+takes per voice, scored against Praat and the corpus expectations. The Cartesia column pools
+seven voices (three masculine, three feminine library voices plus the quickstart voice; per voice
+79.8–93.6), the Deepgram column is one voice:
 
 | | Cartesia (`71a7ad14…`) | Deepgram (`aura-2-helena-en`) |
 |---|---|---|
-| composite (v1 + nasal guards) | **87.5** | **92.0** |
-| f1_mae / f2_mae (Hz, committed hops) | 24 / 113 | 24 / 75 |
-| openness_r / width_r vs Praat | 0.62 / 0.57 | 0.74 / 0.79 |
-| voicing agreement with Praat | 0.95 | 0.85 |
-| conditioning lag (per-stage) | +4 ms | +10 ms |
-| keyframes / s | 29.7 | 31.1 |
-| corpus checks | 31/32 | 30/32 |
+| composite (v1 + nasal guards) | **86.0** (7 voices) | **91.9** |
+| f1_mae / f2_mae (Hz, committed hops) | 31 / 113 | 24 / 75 |
+| F1 / F2 coverage of Praat-voiced hops | 0.81 / 0.78 | 0.91 / 0.81 |
+| openness_r / width_r vs Praat | 0.64 / 0.63 | 0.73 / 0.79 |
+| voicing agreement with Praat | 0.93 | 0.85 |
+| conditioning lag (per-stage, quickstart voice) | +4 ms | +10 ms |
+| keyframes / s | 29.5 | 31.1 |
+| corpus checks | 204/224 | 30/32 |
 
 CPU: ~185 µs per hop (RTF ≈ 0.009). Tests: 55 (`server/tests/`, including the eval recorder's replay, the delivery schedule and a synthetic back vowel that must not read as a murmur). Before the September work the same corpus read
 70.9 / 85.6.
@@ -58,9 +61,18 @@ in place of the forced-shut override, rounding no longer gated off for small ope
 nasal-duty guards on the vowel sentences; Deepgram 90.7 → 92.0, Cartesia unchanged at 87.5 with
 four more checks passing.
 
-Accepted residuals: Cartesia vowel-oo/t2 nasal duty 0.454 against the 0.45 bar; Deepgram
-nasal-hum openness p90 0.29 against 0.30 (the breathy "H" onset); Deepgram pause-probe has no
-300 ms silence (that voice's pause is shorter).
+A fourth pass the same day widened the Cartesia corpus to seven voices (results note, fourth
+pass): the vowel tracking generalizes (F1 error 14–49 Hz, openness_r 0.59–0.70 per voice), the
+event detectors did not. Landed: the SILENCE event at 200 ms (was 300; pauses on six of seven
+voices are shorter), a stale F1 drifting toward closed rather than mid-open (which had opened the
+mouth during hums with no findable F1), Praat ceilings by pitch, and a mama closure bar that only
+guards against no dips at all.
+
+Accepted residuals: the NASAL event never fires on four voices whose hums are bright or breathy
+(no single-frame cue separates them from vowels; see the results note), three hum takes whose
+audio has a vowel-like F1, pauses under 200 ms on four takes, one deep-voice mama take with a
+single dip, Ronald's vowel-aa/t2 openness peak, and the quickstart vowel-oo/t2 nasal duty 0.454
+against 0.45; on Deepgram the nasal-hum openness p90 0.29 against 0.30 and the pause probe.
 
 Tooling since the baselines (2026-09-19): the **eval recorder** (`server/benchmarks/record.py`,
 `eval_corpus.yaml`, 19 lines; `tests/test_eval_record.py`) speaks the corpus through the real output path — `LipsyncProcessor`,
@@ -115,7 +127,9 @@ Reading the numbers — caveats that apply to every future comparison:
 - `f1_mae`/`f2_mae` only score committed hops: a voicing change can raise MAE with bit-identical
   formant tracks. Use `experiments/ab_matched.py` (matched hops) before believing an MAE delta.
 - Single-voice tuning is unsafe; the nasal "missing F2 = damped" rule looked free on Cartesia and
-  lost the hums on Deepgram. Always run both providers.
+  lost the hums on Deepgram, and every event detector tuned on the quickstart voice failed on
+  four of six library voices. Run all seven Cartesia voices and Deepgram; a fresh checkout
+  synthesizes the Cartesia fixtures in about three minutes.
 - Real prediction gain is 19–31 (median), so `_C_FIT_LOG10_FULL` is 3.2; confidence is a
   diagnostic, not a pose or opacity scale.
 
@@ -126,22 +140,29 @@ sections, where each item is worked out in detail. Every runtime change is gated
 `uv run python -m benchmarks.accuracy --offline --compare` on **both** providers; timing changes
 are measured with the eval recorder (`--reanalyze` on the same audio) before and after.
 
-1. **NASAL event semantics.** Back vowels no longer read as murmurs (2026-09-19 veto), but the
-   override still latches on dark voiced consonants (ð, /w l/, voice bars) — spectrally murmurs,
-   mouth nearly closed, so the aperture is right but the label is wrong (harvard-03 duty
-   0.09–0.15). It needs a place cue or a broader name ("dark voiced closure") before clients style
-   it. Rounding is F2-only and marks any low-F2 vowel (/ɑ ɔ/) as rounded ([ROUND-1]).
+1. **The nasal detector across voices.** Its murmur evidence is "dark spectrum + damped F2",
+   which holds on three of seven Cartesia voices and the Deepgram voice; on the other four the
+   hum is as bright as their vowels and NASAL never fires (the mouth still closes on most of them
+   since a stale F1 now drifts toward closed). The feature study in the results note found no
+   single-frame cue; a murmur cue that works across voices probably needs temporal structure
+   (stationarity, level relative to the surrounding vowels) or a place cue. Also still true: on
+   the voices where it does fire it latches on dark voiced consonants (ð, /w l/, voice bars) with
+   the aperture right and the label wrong, and rounding is F2-only, so /ɑ ɔ/ read as rounded
+   ([ROUND-1]).
 2. **Keyframe economy.** 28–31/s against the 25/s guard. The dead band is a constructor default
    the harness cannot sweep; expose it to `--set`, then decide.
 3. **[CONS-1] Energy-gated closures.** The mouth should close with the energy dip instead of only
    badging the event (openness sits at ~0.44 during a /p b m/ today). Now that conditioning no
    longer hides timing, this is measurable with the existing checks.
-4. **Processor hygiene** (review §7, unchanged since): a ≥ 2 s burst on the frame path silently
+4. **Closures on deep voices.** The energy-dip detector under-counts /m/ dips where the murmur
+   is nearly as loud as the vowels (Ronald, Daniel, Jolene); thresholds do not fix it in either
+   direction. The review's [CONS-1] energy-gated aperture and text-gated events are the routes.
+5. **Processor hygiene** (review §7, unchanged since): a ≥ 2 s burst on the frame path silently
    drops audio and misplaces the SILENCE ([PROC-1], relevant to HTTP-burst providers); the stream
    resampler is never flushed at context close, so the last 40–60 ms of every context is not
    analyzed ([PROC-2]); evicting an unflushed context leaks its hops into the next (B13);
    `dead_band`/`heartbeat_ms` runtime updates are silent no-ops (B14).
-5. **Client.** Events are shown as a badge but never shape the pose ([CLIENT-2]); a new
+6. **Client.** Events are shown as a badge but never shape the pose ([CLIENT-2]); a new
    context's first batch wipes the previous context's tail (B17).
 The remaining review §7 items not listed here (F3 hold, rounding gate, closures pending at flush,
 harness `--warm`/`--voices` bugs) are small and unaddressed; take them when touching the code
