@@ -16,15 +16,27 @@ Server-side lipsync for Pipecat voice bots that is
   bot, no model, no new runtime dependency;
 - **drop-in for any provider** — it reads the PCM stream and nothing else (no provider
   timestamps, viseme events or side channels), on released `pipecat-ai` through stock extension
-  points (a frame processor and an RTVI `server-message`), so any `TTSService` works.
+  points (a frame processor and an RTVI `server-message`), so any `TTSService` works. The planned
+  text tier holds this property rather than spending it: it reads only stock in-band text frames
+  every `TTSService` may emit, never a provider side channel, and produces today's output whenever
+  they do not arrive.
 
-The formant DSP analyzer is the design of record and is judged close enough. The next step in
-fidelity would be a trained model (the deep review's "Tier 0.5", the spec's Tier 3); it is not
-planned, because the remaining error is consonant identity that a continuous mouth does not need,
-and a model would cost the training pipeline and some of the three properties above. The
-provider-specific tiers (Azure/Polly visemes, timestamp + grapheme-to-phoneme) are not planned
-either: they contradict "any provider", and pipecat 1.10 exposes no viseme data anyway. The
-project stays a standalone example app; it is not being upstreamed into pipecat (decided
+The formant DSP analyzer is the design of record for the continuous signal, and is judged close
+enough — the 2026-09-19 seven-voice run confirmed it holds across voices. What does not hold is the
+*categorical* layer (closure, nasal, silence): those are absolute thresholds fitted to one voice's
+spectrum, and they break on a seventh. The next step in fidelity is therefore not a trained model
+but the text that is already in the frame stream (Steps forward item 1,
+[text-informed-events.md](text-informed-events.md)) — phone identity is voice-independent, costs a
+dictionary lookup, and is exactly what formants cannot see. A trained model (the deep review's
+"Tier 0.5", the spec's Tier 3) stays off the primary path: it would cost the training pipeline and
+some of the three properties above, and it is worth revisiting only for the providers that send no
+text at all. A provider-viseme tier is not planned: it contradicts "any provider", and pipecat 1.10
+exposes no viseme data anyway. Nor is a timestamp + grapheme-to-phoneme *analyzer*, for the same
+reason — but that is not what item 1 is. The distinction is the whole design: text enters as an
+optional prior that gates and refines what the DSP already produces, with a DSP fallback on every
+path, so a provider that sends no text (or sends it late, or renormalized) is exactly as well served
+as today. A tier that replaces the signal would break the drop-in property; one that refines it does
+not. The project stays a standalone example app; it is not being upstreamed into pipecat (decided
 2026-09-17, [pipecat-1.10-update.md](pipecat-1.10-update.md)).
 
 ## Where it stands
@@ -140,7 +152,20 @@ sections, where each item is worked out in detail. Every runtime change is gated
 `uv run python -m benchmarks.accuracy --offline --compare` on **both** providers; timing changes
 are measured with the eval recorder (`--reanalyze` on the same audio) before and after.
 
-1. **The nasal detector across voices.** Its murmur evidence is "dark spectrum + damped F2",
+1. **[Text-informed events](text-informed-events.md).** The 2026-09-19 seven-voice Cartesia run
+   split the analyzer in two: the continuous mapping holds across voices (f1_mae 14–49 Hz,
+   openness_r 0.59–0.70, width_r 0.56–0.76) while the categorical detectors broke on the new
+   voices — on the first run the hum probe failed on 5 of 6, bilabial closures under-counted on
+   3 of 6, the pause probe's silence failed on 6 of 6. Openness/width/rounding adapt per voice; the
+   event thresholds are absolute and were fitted to one spectrum. So: **text for the categorical
+   decisions, DSP for the continuous ones**, in three staged steps (CMUdict prior → fixed-lag
+   alignment → a conditional learned emission scorer), text always optional with a DSP fallback.
+   Plan, evidence and measurement gates in [text-informed-events.md](text-informed-events.md).
+   Its stage 0 (a reproducible seven-voice corpus and baseline) landed the same day, as did the
+   two failures that were DSP work and not the text tier's to claim (the pause threshold, now
+   200 ms; male-voice F2, a Praat-ceiling matter): what remains for text is the nasal label on
+   bright/breathy voices and the /m/ closures on deep ones, items 2 and 5.
+2. **The nasal detector across voices.** Its murmur evidence is "dark spectrum + damped F2",
    which holds on three of seven Cartesia voices and the Deepgram voice; on the other four the
    hum is as bright as their vowels and NASAL never fires (the mouth still closes on most of them
    since a stale F1 now drifts toward closed). The feature study in the results note found no
@@ -149,20 +174,20 @@ are measured with the eval recorder (`--reanalyze` on the same audio) before and
    the voices where it does fire it latches on dark voiced consonants (ð, /w l/, voice bars) with
    the aperture right and the label wrong, and rounding is F2-only, so /ɑ ɔ/ read as rounded
    ([ROUND-1]).
-2. **Keyframe economy.** 28–31/s against the 25/s guard. The dead band is a constructor default
+3. **Keyframe economy.** 28–31/s against the 25/s guard. The dead band is a constructor default
    the harness cannot sweep; expose it to `--set`, then decide.
-3. **[CONS-1] Energy-gated closures.** The mouth should close with the energy dip instead of only
+4. **[CONS-1] Energy-gated closures.** The mouth should close with the energy dip instead of only
    badging the event (openness sits at ~0.44 during a /p b m/ today). Now that conditioning no
    longer hides timing, this is measurable with the existing checks.
-4. **Closures on deep voices.** The energy-dip detector under-counts /m/ dips where the murmur
+5. **Closures on deep voices.** The energy-dip detector under-counts /m/ dips where the murmur
    is nearly as loud as the vowels (Ronald, Daniel, Jolene); thresholds do not fix it in either
    direction. The review's [CONS-1] energy-gated aperture and text-gated events are the routes.
-5. **Processor hygiene** (review §7, unchanged since): a ≥ 2 s burst on the frame path silently
+6. **Processor hygiene** (review §7, unchanged since): a ≥ 2 s burst on the frame path silently
    drops audio and misplaces the SILENCE ([PROC-1], relevant to HTTP-burst providers); the stream
    resampler is never flushed at context close, so the last 40–60 ms of every context is not
    analyzed ([PROC-2]); evicting an unflushed context leaks its hops into the next (B13);
    `dead_band`/`heartbeat_ms` runtime updates are silent no-ops (B14).
-6. **Client.** Events are shown as a badge but never shape the pose ([CLIENT-2]); a new
+7. **Client.** Events are shown as a badge but never shape the pose ([CLIENT-2]); a new
    context's first batch wipes the previous context's tail (B17).
 The remaining review §7 items not listed here (F3 hold, rounding gate, closures pending at flush,
 harness `--warm`/`--voices` bugs) are small and unaddressed; take them when touching the code
@@ -172,11 +197,10 @@ not bit-exact across chunkings); benign, unmeasured.
 
 ## Parked — evidence exists, no plan
 
-- **Text-informed events** (review §4.8, §8 item 9a/12). The text is already in the frame stream
-  ahead of the audio and 12 providers push playout-timed word frames; CMUdict-style lookup plus
-  the DSP lifted closure precision/recall from 0.16/0.38 to 0.87/0.85 on the proxy corpus,
-  numpy-only. Parked because it makes the signal depend on text frames and a lexicon, and no client
-  needs bilabial/labiodental precision. The cheapest route if one ever does.
+(Text-informed events left this section on 2026-09-19; it is Steps forward item 1. The parking
+reason — "no client needs bilabial/labiodental precision" — was answered by the seven-voice run:
+the issue is not precision, it is that the categorical detectors do not survive a change of voice.)
+
 - **Provider hints as an optional side-channel** (review §8 item 13): Azure visemes, Cartesia
   phoneme timestamps, via app-level service subclasses feeding the same fusion. Not a tier; not
   planned.
@@ -190,11 +214,24 @@ not bit-exact across chunkings); benign, unmeasured.
 
 ## Not planned
 
-- A trained model or learned classifier in the signal path (Tier 0.5 / Tier 3), and the forced
-  alignment tooling it would need.
-- Provider-viseme (Tier 1) or timestamp + G2P (Tier 2) analyzers.
-- The L4 phoneme-target layer and "composite v2" benchmark (review §6.6): the accuracy harness
-  stays Praat + designed corpus, with the guards it has.
+- A trained model or learned classifier in the signal path (Tier 0.5 / Tier 3) as the primary
+  route to fidelity, and the forced alignment tooling it would need at runtime. *Amended
+  2026-09-19:* [text-informed-events.md](text-informed-events.md) §7 reopens this **conditionally**
+  — a 20–50 k-parameter numpy emission scorer, classifier-only, vowels left on the DSP path — and
+  only if the text stages leave a measured residual, and specifically for the providers that send
+  no text at all, where stages 1–2 do nothing. The cost that ruled it out (a training pipeline, a
+  model artefact in the repo) is unchanged; what changed is the benefit side.
+- Provider-viseme (Tier 1) analyzers, or a timestamp + G2P (Tier 2) analyzer *as a replacement for
+  the DSP path*. *Clarified 2026-09-19:* Steps forward item 1 uses the same inputs as Tier 2, but
+  as an optional prior over the DSP rather than a separate analyzer — text never required, DSP
+  always the fallback. What stays not planned is a code path whose output depends on text arriving.
+- "Composite v2" (review §6.6): the accuracy harness stays Praat + designed corpus, with the guards
+  it has. *Amended 2026-09-19:* scoring the text stages needs ground truth the harness does not
+  have (it counts events, it does not score them), so the **minimum** phone-level truth —
+  hand-labelled onsets on a small held-out subset, and expected-phone windows from an offline
+  aligner used dev-side only — comes in as a measurement tool. Not a scored layer, not in the
+  runtime, and not composite v2. See [text-informed-events.md](text-informed-events.md) §8 for why
+  the obvious alternative (scoring text-gated closures against the same text) measures nothing.
 - Upstreaming into pipecat; moving the client into pipecat-examples.
 
 ## Documents
@@ -202,6 +239,7 @@ not bit-exact across chunkings); benign, unmeasured.
 | File | Status | Use it for |
 |---|---|---|
 | `README.md` (this file) | plan of record | status, findings, open / parked / not planned |
+| [text-informed-events.md](text-informed-events.md) | planned (2026-09-19); stage 0 done | the text tier: evidence, stages, measurement gates, what text will not fix |
 | [technical-specification.md](technical-specification.md) | design of record, as built (delta table at the top) | the design and its rationale |
 | [benchmark-harness-accuracy.md](benchmark-harness-accuracy.md) | built (2026-07); as-built notes at the top | how the accuracy score is made and read |
 | [deep-review-2026-09-results.md](deep-review-2026-09-results.md) | done (2026-09-18) | the current numbers, what each DSP change bought, how to read the benchmark |
