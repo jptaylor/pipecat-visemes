@@ -25,6 +25,7 @@ import parselmouth
 from loguru import logger
 
 from benchmarks.common import (
+    NEGATIVE_CONTROLS,
     RESULTS_DIR,
     Clip,
     Sentence,
@@ -37,6 +38,7 @@ from benchmarks.common import (
     src_sha,
     teardowns_pending,
 )
+from benchmarks.text_timing import FixtureTextInputs
 from lipsync.base_lipsync_analyzer import LipsyncAnalysisContext
 from lipsync.formant_lipsync_analyzer import FormantLipsyncAnalyzer
 from lipsync.text_prior import TextAnchor, TextPrior
@@ -106,6 +108,8 @@ class ClipResult:
     metrics: dict[str, float]
     checks: dict[str, bool] = field(default_factory=dict)
     output_sha256: str = ""
+    pcm_sha256: str = ""
+    text_stats: dict = field(default_factory=dict)
 
 
 #
@@ -150,8 +154,10 @@ async def analyze_clip(
     warm_rate: int = 0,
     *,
     text_prior: bool = False,
+    text_events: bool = False,
+    text_stats: dict | None = None,
 ):
-    analyzer = FormantLipsyncAnalyzer(collect_debug=True)
+    analyzer = FormantLipsyncAnalyzer(collect_debug=True, text_events_enabled=text_events)
     await analyzer.start(clip.sample_rate)
 
     if warm_pcm:
@@ -168,13 +174,20 @@ async def analyze_clip(
         # alignment. Do not fabricate word timing from the clip's duration.
         context.text_prior = TextPrior(anchors=(TextAnchor(clip.sentence.text),))
     keyframes, events = [], []
-    async for chunk in chunks_16k_float32(clip.pcm, clip.sample_rate):
+    inputs = FixtureTextInputs(clip, context) if text_events else None
+    async for chunk in chunks_16k_float32(
+        clip.pcm, clip.sample_rate, on_ingest=inputs.ingest if inputs else None
+    ):
         result = await analyzer.analyze(chunk, context)
         keyframes += result.keyframes
         events += result.events
+    if inputs:
+        inputs.ingest(len(clip.pcm) // 2, final=True)
     result = await analyzer.flush(context)
     keyframes += result.keyframes
     events += result.events
+    if text_stats is not None:
+        text_stats.update(analyzer.text_stats)
     return keyframes, events, analyzer.debug_features[warm_frames:]
 
 
@@ -496,7 +509,7 @@ def report(results: list[ClipResult], run_meta: dict, baseline: dict | None):
         f"\nACCURACY  {run_meta['provider']} · {len(set(r.voice_id for r in results))} voice(s) · "
         f"{len(set(r.sentence_id for r in results))} sentences · {run_meta['takes']} take(s)"
         f"{' · warm' if run_meta['warm'] else ''}"
-        f"{' · text prior: untimed corpus (observe)' if run_meta.get('text_prior') else ' · text: off'}"
+        f"{' · text: events' if run_meta.get('text_events') else (' · text: observe' if run_meta.get('text_prior') else ' · text: off')}"
         f"\ncomposite {composite:.1f}{base_line}\n"
     )
     if baseline:
@@ -619,6 +632,8 @@ def report(results: list[ClipResult], run_meta: dict, baseline: dict | None):
 
 async def run(args) -> dict:
     sentences, voice_map = load_corpus()
+    if args.negative_controls:
+        sentences = NEGATIVE_CONTROLS
     if args.sentences:
         wanted = set(args.sentences.split(","))
         missing = wanted - {s.id for s in sentences}
@@ -647,15 +662,27 @@ async def run(args) -> dict:
                 1,
                 offline=args.offline,
                 refresh=False,
+                fixture_dir=args.fixtures,
             )
             warm_pcm, warm_rate = warm_clip.pcm, warm_clip.sample_rate
         for sentence in sentences:
             for take in range(1, args.takes + 1):
                 clip = await get_clip(
-                    sentence, voice, take, offline=args.offline, refresh=args.refresh
+                    sentence,
+                    voice,
+                    take,
+                    offline=args.offline,
+                    refresh=args.refresh,
+                    fixture_dir=args.fixtures,
                 )
+                text_stats = {}
                 keyframes, events, debug = await analyze_clip(
-                    clip, warm_pcm, warm_rate, text_prior=args.text_prior
+                    clip,
+                    warm_pcm,
+                    warm_rate,
+                    text_prior=args.text_prior,
+                    text_events=args.text_events,
+                    text_stats=text_stats,
                 )
                 if not debug:
                     print(f"  ! no analysis frames for {clip.label}; skipping")
@@ -672,6 +699,8 @@ async def run(args) -> dict:
                         metrics=metrics,
                         checks=run_checks(sentence, metrics),
                         output_sha256=output_digest(keyframes, events),
+                        pcm_sha256=hashlib.sha256(clip.pcm).hexdigest(),
+                        text_stats=text_stats,
                     )
                 )
 
@@ -695,7 +724,11 @@ async def run(args) -> dict:
             "overrides": getattr(args, "overrides", {}),
             "ceiling_override": args.ceiling,
             "text_prior": args.text_prior,
-            "text_source": "untimed-corpus" if args.text_prior else "none",
+            "text_events": args.text_events,
+            "text_source": "captured-when-available-otherwise-untimed"
+            if args.text_events
+            else ("untimed-corpus" if args.text_prior else "none"),
+            "fixtures": str(args.fixtures) if args.fixtures else "default",
         },
         "composite": composite,
         "component_scores": comp_scores,
@@ -709,6 +742,8 @@ async def run(args) -> dict:
                 "metrics": {k: (v if np.isfinite(v) else None) for k, v in r.metrics.items()},
                 "checks": r.checks,
                 "output_sha256": r.output_sha256,
+                "pcm_sha256": r.pcm_sha256,
+                "text_stats": r.text_stats,
             }
             for r in results
         ],
@@ -728,14 +763,25 @@ def validate_comparison(run: dict, baseline: dict):
     """
     other = baseline["run"]
     mismatches = []
-    for key in ("provider", "voices", "sentences", "takes", "warm", "ceiling_override"):
+    for key in ("provider", "voices", "sentences", "takes", "warm", "ceiling_override", "fixtures"):
         a, b = run.get(key), other.get(key)
+        if key == "fixtures":
+            a, b = a or "default", b or "default"
         if key in ("voices", "sentences"):
             a, b = sorted(a or []), sorted(b or [])
         if a != b:
             mismatches.append(key)
     if mismatches:
         raise ValueError("incompatible comparison: " + ", ".join(mismatches))
+
+
+def validate_audio_comparison(payload: dict, baseline: dict):
+    """Refuse refreshed audio masquerading as an implementation A/B test."""
+    previous = {c["label"]: c.get("pcm_sha256") for c in baseline.get("clips", [])}
+    for clip in payload.get("clips", []):
+        old = previous.get(clip["label"])
+        if old and clip.get("pcm_sha256") and old != clip["pcm_sha256"]:
+            raise ValueError(f"incompatible comparison: changed PCM for {clip['label']}")
 
 
 async def calibrate(args):
@@ -749,7 +795,14 @@ async def calibrate(args):
         per_sentence: dict[str, list[dict[str, float]]] = {}
         for sentence in sentences:
             for take in range(1, args.takes + 1):
-                clip = await get_clip(sentence, voice, take, offline=args.offline, refresh=False)
+                clip = await get_clip(
+                    sentence,
+                    voice,
+                    take,
+                    offline=args.offline,
+                    refresh=False,
+                    fixture_dir=args.fixtures,
+                )
                 _, _, debug = await analyze_clip(clip)
                 if not debug:
                     continue
@@ -776,8 +829,21 @@ def main():
     parser.add_argument("--takes", type=int, default=2)
     parser.add_argument("--offline", action="store_true", help="never synthesize; cache only")
     parser.add_argument("--refresh", action="store_true", help="re-synthesize fixtures")
+    parser.add_argument(
+        "--fixtures", type=Path, help="separate fixture directory (preserves original takes)"
+    )
     parser.add_argument("--warm", action="store_true", help="pre-converge analyzer per voice")
     parser.add_argument("--save-baseline", action="store_true")
+    parser.add_argument(
+        "--negative-controls",
+        action="store_true",
+        help="separate held-out nasal/bilabial-free sentences (never part of the saved baseline)",
+    )
+    parser.add_argument(
+        "--text-events",
+        action="store_true",
+        help="enable experimental text-informed events, replaying captured text availability",
+    )
     parser.add_argument(
         "--text-prior",
         action="store_true",
@@ -810,7 +876,7 @@ def main():
         help="print Praat-oracle p90 stats per clip (for setting corpus bars) and exit",
     )
     args = parser.parse_args()
-    if args.save_baseline and args.text_prior:
+    if args.save_baseline and (args.text_prior or args.text_events or args.negative_controls):
         parser.error(
             "use --tag for text experiments; --save-baseline is reserved for DSP-only runs"
         )
@@ -838,6 +904,7 @@ def main():
             baseline = json.loads(compare_path.read_text())
             try:
                 validate_comparison(payload["run"], baseline)
+                validate_audio_comparison(payload, baseline)
             except ValueError as e:
                 parser.error(str(e))
         else:

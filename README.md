@@ -129,12 +129,15 @@ checkout once the fixtures exist; fixtures themselves are not committed. While t
 names the results file; `plans/experiments/ab_table.py` runs whole A/B ladders.
 
 Text-informed work is isolated on `codex/text-informed-events`; `main` at `8ea78f0`
-is the original comparison point. The branch's first checkpoint adds optional text
-observations and A/B provenance, with the existing DSP analyzer and default behavior.
-`--text-prior` supplies untimed corpus text to the accuracy driver (observation only for
-now); results include full-precision output hashes for exact regression comparisons.
-Use `--tag` for experiments and `--compare <results.json>` for matching runs. Commands,
-status and the remaining event work are in
+is the original comparison point. Stage 1 now has an **opt-in** English pronunciation
+prior for closure/nasal decisions and timed mouth-shape hints. Default DSP behavior is
+unchanged. Enable it with `LipsyncParams(text_events_enabled=True)` or benchmark with
+`--text-events`; `--text-prior` remains observation-only. Copy the entire `lipsync/`
+directory, including its licensed, packed `data/` lexicon; no new runtime dependency.
+Results include full-precision output and PCM hashes. Use `--tag` and
+`--compare <results.json>` for paired runs, and `--fixtures <directory>` to retain a
+separate audio/text-timing corpus. The gains and regressions are reviewed in
+[stage-1 results](plans/text-informed-events-stage1-results.md). Commands and limitations are in
 [the text-informed plan](plans/text-informed-events.md#current-branch-checkpoint--inputs-and-comparison).
 
 ## Eval tab
@@ -158,10 +161,14 @@ with its release and due times, word timings, and the TTS arrival timeline, whic
 to the newest recording so changes compare on identical audio. Files land in
 `client/public/eval/` (gitignored), served as-is by the Vite dev server.
 
-On the text-informed branch, `--text-prior` enables observation of those frames by the
-processor. Old recordings did not capture sentence anchors: `--assume-early-text` explicitly
+On the text-informed branch, `--text-events` enables the experimental event layer;
+`--text-prior` only observes the frames. Old recordings did not capture sentence anchors: `--assume-early-text` explicitly
 supplies one from each example's text for those takes and marks the assumption in the run.
 New recordings preserve the real anchor arrivals automatically, including late or absent text.
+
+For example, `uv run python -m benchmarks.record --reanalyze --text-events
+--assume-early-text --tag stage1-events` adds a selectable experimental run to a legacy
+recording. Omit `--assume-early-text` for a new recording with captured anchors.
 
 In the tab, **as delivered** hands each batch to the stock feed at its recorded release time,
 so it anchors exactly as a connected client would (minus network); **ideal** puts every batch

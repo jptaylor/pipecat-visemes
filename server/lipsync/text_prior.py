@@ -6,7 +6,7 @@
 
 """Optional, immutable text observations for one TTS context.
 
-These are inputs to a future text-informed analyzer, not phoneme labels or
+These are optional inputs to text-informed analysis, not phoneme labels or
 assertions about what was spoken. In particular, ``received_after_audio`` is
 the amount of audio ingested when a frame arrived, NOT that word's onset.
 ``pts`` preserves the provider's pipeline-clock timestamp in nanoseconds.
@@ -57,6 +57,10 @@ class TextPrior:
     anchors: tuple[TextAnchor, ...] = ()
     words: tuple[TextWord, ...] = ()
     playout_start_pts: int | None = None
+    # Estimate of TTSService's max(previous word PTS, first audio receipt).
+    # Never the pre-synthesis sentence announcement. Corpus timing uses 0.
+    word_start_pts: int | None = None
+    audio_end: float | None = None
 
 
 class _TextAccumulator:
@@ -89,13 +93,26 @@ class _TextAccumulator:
         self._snapshot = None
         return True
 
-    def snapshot(self, playout_start_pts: int | None) -> TextPrior | None:
+    def snapshot(
+        self,
+        playout_start_pts: int | None,
+        *,
+        word_start_pts: int | None = None,
+        audio_end: float | None = None,
+    ) -> TextPrior | None:
         if self.rejected or not (self.anchors or self.words):
             return None
-        if self._snapshot is None or self._snapshot.playout_start_pts != playout_start_pts:
+        if (
+            self._snapshot is None
+            or self._snapshot.playout_start_pts != playout_start_pts
+            or self._snapshot.word_start_pts != word_start_pts
+            or self._snapshot.audio_end != audio_end
+        ):
             self._snapshot = TextPrior(
                 anchors=tuple(self.anchors),
                 words=tuple(self.words),
                 playout_start_pts=playout_start_pts,
+                word_start_pts=word_start_pts,
+                audio_end=audio_end,
             )
         return self._snapshot

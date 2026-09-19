@@ -55,10 +55,13 @@ class TestEvalRecorder(unittest.IsolatedAsyncioTestCase):
 
         self.assertTrue(clean)
         (take,) = takes
-        # Audio as played: the TTS audio, padded out to whole transport writes.
-        self.assertEqual(take.pcm[: len(pcm)], pcm)
-        self.assertLess(len(take.pcm) - len(pcm), CHUNK_BYTES)
-        self.assertEqual(take.arrival["gaps"], [])
+        # The simulated device can run dry briefly under scheduler jitter,
+        # even with a fast source. Its recorded gaps are part of "as played",
+        # not corruption of the source audio. Verify exact recovery plus
+        # bounded transport padding, rather than assuming a real-time OS.
+        gaps = take.arrival["gaps"]
+        self.assertEqual(_strip_gaps(take.pcm, gaps, len(pcm)), pcm)
+        self.assertLess(len(take.pcm) - len(pcm) - sum(size for _, size in gaps), CHUNK_BYTES)
 
         self.assertTrue(take.messages)
         for message in take.messages:

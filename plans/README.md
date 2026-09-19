@@ -165,9 +165,11 @@ are measured with the eval recorder (`--reanalyze` on the same audio) before and
    two failures that were DSP work and not the text tier's to claim (the pause threshold, now
    200 ms; male-voice F2, a Praat-ceiling matter): what remains for text is the nasal label on
    bright/breathy voices and the /m/ closures on deep ones, items 2 and 5.
-   Work has started on `codex/text-informed-events`, with optional text-input plumbing and
-   exact-output A/B checks; event decisions still use the DSP analyzer. The input checkpoint
-   and a correction to the sentence/word clock assumption are documented in the plan and
+   Stage 1 is implemented, opt-in, on `codex/text-informed-events`: packed CMUdict,
+   conservative inventory/hum priors and causal word-timed hints. Default DSP and `main`
+   remain unchanged. [The stage-1 review](text-informed-events-stage1-results.md) compares
+   accuracy, delivery latency, CPU and allocations; improvements are not uniform, so it
+   is not ready to replace the baseline. The earlier input-only checkpoint is retained in
    [its results note](text-informed-events-results.md).
 2. **The nasal detector across voices.** Its murmur evidence is "dark spectrum + damped F2",
    which holds on three of seven Cartesia voices and the Deepgram voice; on the other four the
@@ -243,7 +245,7 @@ the issue is not precision, it is that the categorical detectors do not survive 
 | File | Status | Use it for |
 |---|---|---|
 | `README.md` (this file) | plan of record | status, findings, open / parked / not planned |
-| [text-informed-events.md](text-informed-events.md) | planned (2026-09-19); stage 0 done | the text tier: evidence, stages, measurement gates, what text will not fix |
+| [text-informed-events.md](text-informed-events.md) | stage 1 experimental (2026-09-19) | the text tier: evidence, stages, measurement gates, what text will not fix |
 | [technical-specification.md](technical-specification.md) | design of record, as built (delta table at the top) | the design and its rationale |
 | [benchmark-harness-accuracy.md](benchmark-harness-accuracy.md) | built (2026-07); as-built notes at the top | how the accuracy score is made and read |
 | [deep-review-2026-09-results.md](deep-review-2026-09-results.md) | done (2026-09-18) | the current numbers, what each DSP change bought, how to read the benchmark |

@@ -525,14 +525,21 @@ class _Source:
 
 
 async def _run_examples(
-    examples: list[Example], source: _Source, sample_rate: int, *, text_prior: bool = False
+    examples: list[Example],
+    source: _Source,
+    sample_rate: int,
+    *,
+    text_prior: bool = False,
+    text_events: bool = False,
 ) -> tuple[list[_Take], bool]:
     """Speak every example through one pipeline session.
 
     Returns the takes and whether the pipeline shut down cleanly.
     """
     recorder = _Recorder()
-    lipsync_processor = LipsyncProcessor(params=LipsyncParams(text_prior_enabled=text_prior))
+    lipsync_processor = LipsyncProcessor(
+        params=LipsyncParams(text_prior_enabled=text_prior, text_events_enabled=text_events)
+    )
     transport = _PlayoutTransport(recorder.on_played)
     processors = [
         _Tap(recorder.on_input),
@@ -693,11 +700,16 @@ def _run_payload(
     overrides: dict,
     *,
     text_prior: bool = False,
+    text_events: bool = False,
     assumed_text_examples: list[str] | None = None,
 ) -> dict:
     sha, dirty = src_sha(), _lipsync_dirty()
     label = " · ".join(
-        [run_id, sha + ("+dirty" if dirty else ""), "text: observe" if text_prior else "text: off"]
+        [
+            run_id,
+            sha + ("+dirty" if dirty else ""),
+            "text: events" if text_events else ("text: observe" if text_prior else "text: off"),
+        ]
         + (["assumed early text"] if assumed_text_examples else [])
         + [f"{k}={v}" for k, v in overrides.items()]
     )
@@ -710,6 +722,7 @@ def _run_payload(
         "git": {"sha": sha, "dirty": dirty},
         "lipsync_sha256": lipsync_digest(),
         "text_prior": text_prior,
+        "text_events": text_events,
         "assumed_text_examples": assumed_text_examples or [],
         "overrides": overrides,
         "examples": {
@@ -758,6 +771,7 @@ async def record_new(args, overrides: dict) -> bool:
         _Source(tts=make_tts(args.provider, voice)),
         sample_rate,
         text_prior=args.text_prior,
+        text_events=args.text_events,
     )
     if not takes:
         raise SystemExit("nothing recorded")
@@ -776,7 +790,14 @@ async def record_new(args, overrides: dict) -> bool:
         },
         compact=True,
     )
-    run = _run_payload(args.tag or "live", "live", takes, overrides, text_prior=args.text_prior)
+    run = _run_payload(
+        args.tag or "live",
+        "live",
+        takes,
+        overrides,
+        text_prior=args.text_prior,
+        text_events=args.text_events,
+    )
     _write_json(rec_dir / "runs" / f"{run['id']}.json", run, compact=True)
     _write_json(
         rec_dir / "recording.json",
@@ -841,7 +862,9 @@ async def reanalyze(args, overrides: dict) -> bool:
     print(f"reanalyzing {len(examples)} examples of {recording['id']}")
     if assumed:
         print(f"  assuming an early, untimestamped sentence anchor for {len(assumed)} legacy takes")
-    takes, clean = await _run_examples(examples, source, sample_rate, text_prior=args.text_prior)
+    takes, clean = await _run_examples(
+        examples, source, sample_rate, text_prior=args.text_prior, text_events=args.text_events
+    )
     if not takes:
         raise SystemExit("nothing analyzed")
 
@@ -851,6 +874,7 @@ async def reanalyze(args, overrides: dict) -> bool:
         takes,
         overrides,
         text_prior=args.text_prior,
+        text_events=args.text_events,
         assumed_text_examples=assumed,
     )
     _write_json(rec_dir / "runs" / f"{run_id}.json", run, compact=True)
@@ -868,6 +892,9 @@ def main():
         "--voice", help="voice id (default: the bot's Cartesia voice, or corpus.yaml's)"
     )
     parser.add_argument("--examples", help="comma-separated example ids (default: all)")
+    parser.add_argument(
+        "--text-events", action="store_true", help="enable experimental text-informed events"
+    )
     parser.add_argument(
         "--reanalyze",
         nargs="?",

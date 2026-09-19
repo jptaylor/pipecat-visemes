@@ -119,8 +119,11 @@ class LipsyncParams(BaseModel):
             effect from the next TTS context.
         text_prior_enabled: Collect stock sentence anchors and word timestamps
             as optional analyzer inputs. Experimental and off by default.
-            The formant analyzer currently ignores these (observation only).
+            Without text_events_enabled, these are observation only.
             Enabling takes effect on the next context; disabling drops priors.
+        text_events_enabled: Opt in to experimental English text-informed
+            events in the default analyzer. Implies text collection. Custom
+            analyzers own this setting, like dead_band. Off by default.
     """
 
     batch_window_ms: int = 200
@@ -131,6 +134,7 @@ class LipsyncParams(BaseModel):
     emit_pitch: bool = True
     enabled: bool = True
     text_prior_enabled: bool = False
+    text_events_enabled: bool = False
 
 
 class _Context:
@@ -150,6 +154,8 @@ class _Context:
         self.capacity = 0  # set at first audio, once the sample rate is known
         self.sample_rate = 0
         self.t0 = 0
+        self.previous_word_pts = 0
+        self.word_start_pts: int | None = None
         self.transport_destination: str | None = None
         self.closing = False
         self.analysis = LipsyncAnalysisContext(context_id=context_id, sample_rate=0)
@@ -244,9 +250,11 @@ class LipsyncProcessor(FrameProcessor):
         """
         super().__init__(**kwargs)
         self._params = params or LipsyncParams()
+        self._owns_analyzer = analyzer is None
         self._analyzer = analyzer or FormantLipsyncAnalyzer(
             dead_band=self._params.dead_band,
             heartbeat_ms=self._params.heartbeat_ms,
+            text_events_enabled=self._params.text_events_enabled,
         )
 
         # Contexts in creation order. A TTS service may reopen a context id it
@@ -271,6 +279,7 @@ class LipsyncProcessor(FrameProcessor):
         # queues behind another one is anchored where that audio ends rather
         # than at its own arrival time.
         self._last_playout_end = 0
+        self._last_word_pts = 0
         self._stopping = False
         self._failed = False
         self._stats = {
@@ -291,7 +300,14 @@ class LipsyncProcessor(FrameProcessor):
     @property
     def stats(self) -> dict[str, int]:
         """Diagnostic counters (batches, drops, late releases); read-only snapshot."""
-        return dict(self._stats)
+        return {
+            **self._stats,
+            **{f"prior_{k}": v for k, v in getattr(self._analyzer, "text_stats", {}).items()},
+        }
+
+    @property
+    def _collect_text(self) -> bool:
+        return self._params.text_prior_enabled or self._params.text_events_enabled
 
     async def setup(self, setup: FrameProcessorSetup):
         """Set up the processor.
@@ -369,13 +385,21 @@ class LipsyncProcessor(FrameProcessor):
             self._stats["contexts_evicted"] += 1
             logger.warning(f"{self} evicted stale lipsync context {evicted.context_id}")
         text = None
-        if self._params.text_prior_enabled:
+        if self._collect_text:
             text = self._pending_text.pop(frame.context_id, None) or _TextAccumulator()
-        self._contexts.append(_Context(frame.context_id, text))
+        context = _Context(frame.context_id, text)
+        context.previous_word_pts = self._last_word_pts
+        self._contexts.append(context)
         self._stats["contexts_opened"] += 1
 
     def _handle_tts_text(self, frame: AggregatedTextFrame):
-        if not self._params.enabled or not self._params.text_prior_enabled or self._failed:
+        if (
+            isinstance(frame, TTSTextFrame)
+            and frame.aggregated_by == "word"
+            and frame.pts is not None
+        ):
+            self._last_word_pts = frame.pts
+        if not self._params.enabled or not self._collect_text or self._failed:
             return
         # TTSTextFrame subclasses AggregatedTextFrame: check it FIRST, or
         # every word (and the non-streaming completion sentence) becomes a
@@ -423,6 +447,9 @@ class LipsyncProcessor(FrameProcessor):
             # Audio plays when it arrives unless earlier audio is still
             # queued, in which case it plays when that audio ends.
             context.t0 = max(now, self._last_playout_end)
+            # Pipecat's word clock starts at first audio, but can inherit the
+            # preceding context's last word PTS. Sentence-anchor PTS is earlier.
+            context.word_start_pts = max(now, context.previous_word_pts)
             context.sample_rate = frame.sample_rate
             context.analysis.sample_rate = frame.sample_rate
             context.transport_destination = frame.transport_destination
@@ -442,6 +469,7 @@ class LipsyncProcessor(FrameProcessor):
             context.skip_offset += overflow / 2.0 / context.sample_rate
             context.drop_silence_pending = True
             self._stats["bytes_dropped"] += overflow
+            context.text = None  # Timing no longer matches the analyzer cursor.
         context.buffer += frame.audio
         context.analysis.samples_seen += frame.num_frames
         self._last_playout_end = max(self._last_playout_end, context.playout_end)
@@ -457,7 +485,7 @@ class LipsyncProcessor(FrameProcessor):
 
     async def _handle_interruption(self):
         # Batches not yet released go the way of the discarded audio.
-        await self._discard_analysis_state()
+        await self._discard_analysis_state(reset_word_clock=True)
 
     async def _handle_update_settings(self, frame: LipsyncUpdateSettingsFrame):
         for key, value in frame.settings.items():
@@ -465,15 +493,17 @@ class LipsyncProcessor(FrameProcessor):
                 setattr(self._params, key, value)
             else:
                 logger.warning(f"{self} unknown lipsync setting: {key}")
+        if self._owns_analyzer:
+            self._analyzer.set_text_events_enabled(self._params.text_events_enabled)
         if not self._params.enabled:
             await self._discard_analysis_state()
-        elif not self._params.text_prior_enabled:
+        elif not self._collect_text:
             self._pending_text.clear()
             for context in self._contexts:
                 context.text = None
                 context.analysis.text_prior = None
 
-    async def _discard_analysis_state(self):
+    async def _discard_analysis_state(self, *, reset_word_clock: bool = False):
         """Drop buffers and in-flight work; adaptive analyzer state survives."""
         self._generation += 1
         self._contexts.clear()
@@ -482,6 +512,9 @@ class LipsyncProcessor(FrameProcessor):
         self._deliver_wake.set()
         # Queued audio was discarded too, so nothing is playing after now.
         self._last_playout_end = 0
+        # Disabling lipsync alone does not reset the upstream TTS word clock.
+        if reset_word_clock:
+            self._last_word_pts = 0
         if self._task:
             await self._analyzer.reset()
 
@@ -659,7 +692,13 @@ class LipsyncProcessor(FrameProcessor):
     @staticmethod
     def _snapshot_text(context: _Context):
         context.analysis.text_prior = (
-            context.text.snapshot(context.t0 or None) if context.text is not None else None
+            context.text.snapshot(
+                context.t0 or None,
+                word_start_pts=context.word_start_pts,
+                audio_end=context.ingested_seconds if context.closing else None,
+            )
+            if context.text is not None
+            else None
         )
 
     def _merge_result(self, context: _Context, result: LipsyncFrameResult):

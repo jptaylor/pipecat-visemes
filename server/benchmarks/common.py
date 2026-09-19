@@ -12,7 +12,7 @@ import json
 import os
 import subprocess
 import wave
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
@@ -22,11 +22,13 @@ import yaml
 from dotenv import load_dotenv
 from pipecat.audio.utils import create_stream_resampler
 from pipecat.frames.frames import (
+    AggregatedTextFrame,
     EndFrame,
     Frame,
     TTSAudioRawFrame,
     TTSSpeakFrame,
     TTSStoppedFrame,
+    TTSTextFrame,
 )
 from pipecat.pipeline.pipeline import Pipeline
 from pipecat.pipeline.worker import PipelineParams, PipelineWorker
@@ -82,6 +84,25 @@ class Voice:
     formant_ceiling: float
 
 
+# Separate, previously untuned controls. Do not change the saved corpus or
+# its bars when testing a new detector. Neither text contains a bilabial or
+# nasal phoneme in ordinary English pronunciation.
+NEGATIVE_CONTROLS = [
+    Sentence(
+        "control-stars",
+        "See the stars as they rise.",
+        ["negative-control"],
+        {"closures_max": 0, "nasals_max": 0},
+    ),
+    Sentence(
+        "control-you",
+        "We will see you early.",
+        ["negative-control"],
+        {"closures_max": 0, "nasals_max": 0},
+    ),
+]
+
+
 @dataclass
 class Clip:
     """One cached synthesis: PCM plus its provenance."""
@@ -91,6 +112,7 @@ class Clip:
     take: int
     pcm: bytes  # int16 mono
     sample_rate: int
+    text_timing: dict | None = None
 
     @property
     def label(self) -> str:
@@ -141,15 +163,46 @@ class _AudioCollector(FrameProcessor):
         self.chunks: list[bytes] = []
         self.sample_rate = 0
         self.done = asyncio.Event()
+        self.first_audio_ns: int | None = None
+        self.samples = 0
+        self.anchors: list[tuple[str, int | None, int]] = []
+        self.words: list[tuple[str, int, int]] = []
 
     async def process_frame(self, frame: Frame, direction: FrameDirection):
         await super().process_frame(frame, direction)
         if isinstance(frame, TTSAudioRawFrame):
+            if self.first_audio_ns is None:
+                self.first_audio_ns = self.get_clock().get_time()
             self.chunks.append(frame.audio)
             self.sample_rate = frame.sample_rate
+            self.samples += frame.num_frames
+        elif isinstance(frame, TTSTextFrame):
+            if frame.aggregated_by == "word" and frame.pts is not None:
+                self.words.append((frame.text, frame.pts, self.samples))
+        elif isinstance(frame, AggregatedTextFrame):
+            if frame.will_be_spoken and frame.aggregated_by == "sentence":
+                self.anchors.append((frame.text, frame.pts, self.samples))
         elif isinstance(frame, TTSStoppedFrame):
             self.done.set()
         await self.push_frame(frame, direction)
+
+    def text_timing(self) -> dict:
+        def rows(entries):
+            return [
+                [
+                    text,
+                    (pts - self.first_audio_ns) / 1e9 if pts is not None else None,
+                    samples / self.sample_rate,
+                ]
+                for text, pts, samples in entries
+            ]
+
+        return {
+            "version": 1,
+            "origin": "first-audio-receipt",
+            "anchors": rows(self.anchors),
+            "words": rows(self.words),
+        }
 
 
 def make_tts(provider: str, voice_id: str):
@@ -188,7 +241,7 @@ def _detach_teardown(worker, run_task: asyncio.Task):
     task.add_done_callback(_teardowns.discard)
 
 
-async def synthesize(provider: str, voice_id: str, text: str) -> tuple[bytes, int]:
+async def synthesize(provider: str, voice_id: str, text: str, *, with_text: bool = False):
     """Synthesize one utterance through a real pipecat TTS service.
 
     Returns (int16 mono PCM, sample rate).
@@ -217,11 +270,14 @@ async def synthesize(provider: str, voice_id: str, text: str) -> tuple[bytes, in
         raise
     if not collector.chunks:
         raise RuntimeError(f"TTS produced no audio for: {text!r}")
-    return b"".join(collector.chunks), collector.sample_rate
+    result = b"".join(collector.chunks), collector.sample_rate
+    return (*result, collector.text_timing()) if with_text else result
 
 
-def _fixture_paths(sentence: Sentence, voice: Voice, take: int) -> tuple[Path, Path]:
-    base = FIXTURES_DIR / voice.provider / voice.id / sentence.id
+def _fixture_paths(
+    sentence: Sentence, voice: Voice, take: int, fixture_dir: Path | None = None
+) -> tuple[Path, Path]:
+    base = (fixture_dir or FIXTURES_DIR) / voice.provider / voice.id / sentence.id
     return base / f"take-{take}.wav", base / f"take-{take}.json"
 
 
@@ -240,23 +296,31 @@ def write_wav(path: Path, pcm: bytes, sample_rate: int):
 
 
 async def get_clip(
-    sentence: Sentence, voice: Voice, take: int, *, offline: bool, refresh: bool
+    sentence: Sentence,
+    voice: Voice,
+    take: int,
+    *,
+    offline: bool,
+    refresh: bool,
+    fixture_dir: Path | None = None,
 ) -> Clip:
     """Fetch one clip, cache-first. Sidecar text mismatch invalidates the cache."""
-    wav_path, meta_path = _fixture_paths(sentence, voice, take)
+    wav_path, meta_path = _fixture_paths(sentence, voice, take, fixture_dir)
 
     if wav_path.exists() and meta_path.exists() and not refresh:
         meta = json.loads(meta_path.read_text())
         if meta.get("text") == sentence.text:
             pcm, sample_rate = read_wav(wav_path)
-            return Clip(sentence, voice, take, pcm, sample_rate)
+            return Clip(sentence, voice, take, pcm, sample_rate, meta.get("text_timing"))
         print(f"  stale fixture (text changed): {wav_path}")
 
     if offline:
         raise FileNotFoundError(f"--offline but no fixture for {sentence.id} take {take}")
 
     print(f"  synthesizing {voice.provider}/{voice.id[:12]}… {sentence.id} take {take}")
-    pcm, sample_rate = await synthesize(voice.provider, voice.id, sentence.text)
+    pcm, sample_rate, text_timing = await synthesize(
+        voice.provider, voice.id, sentence.text, with_text=True
+    )
     write_wav(wav_path, pcm, sample_rate)
     meta_path.write_text(
         json.dumps(
@@ -266,11 +330,12 @@ async def get_clip(
                 "provider": voice.provider,
                 "voice": voice.id,
                 "created_at": datetime.now(UTC).isoformat(),
+                "text_timing": text_timing,
             },
             indent=2,
         )
     )
-    return Clip(sentence, voice, take, pcm, sample_rate)
+    return Clip(sentence, voice, take, pcm, sample_rate, text_timing)
 
 
 #
@@ -331,7 +396,7 @@ def lipsync_digest() -> str:
     """
     root = Path(dsp.__file__).parent
     digest = hashlib.sha256()
-    for path in sorted(root.rglob("*.py")):
+    for path in sorted(p for p in root.rglob("*") if p.suffix in {".py", ".gz", ".json"}):
         digest.update(path.relative_to(root).as_posix().encode() + b"\0")
         digest.update(path.read_bytes() + b"\0")
     return digest.hexdigest()
@@ -343,7 +408,11 @@ def lipsync_digest() -> str:
 
 
 async def chunks_16k_float32(
-    pcm: bytes, sample_rate: int, chunk_ms: int = 20
+    pcm: bytes,
+    sample_rate: int,
+    chunk_ms: int = 20,
+    *,
+    on_ingest: Callable[[int], None] | None = None,
 ) -> AsyncIterator[np.ndarray]:
     """Yield 16 kHz float32 chunks exactly as LipsyncProcessor ingests audio.
 
@@ -353,6 +422,8 @@ async def chunks_16k_float32(
     resampler = create_stream_resampler()
     chunk_bytes = int(sample_rate * chunk_ms / 1000) * 2
     for i in range(0, len(pcm), chunk_bytes):
+        if on_ingest:
+            on_ingest(min(i + chunk_bytes, len(pcm)) // 2)
         resampled = await resampler.resample(
             pcm[i : i + chunk_bytes], sample_rate, ANALYSIS_SAMPLE_RATE
         )
