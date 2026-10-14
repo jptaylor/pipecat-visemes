@@ -56,10 +56,10 @@ _UNVOICED_DECAY = 0.8
 _UTTERANCE_CLOSE_SEC = 0.1
 # The pose the mouth closes to: what the unvoiced decay above converges to
 # once the energy is under the silence gate, so a clip that already ended at
-# rest is recognised as such and gets no extra keyframe. (The client's own
-# REST_POSE fallback in feed.ts agrees on openness and width but rests
-# rounding at 0.1 rather than _NEUTRAL; on a mouth this closed the difference
-# is not visible, but the two should be reconciled.)
+# rest is recognised as such and gets no extra keyframe. The runtimes fall
+# back to this same pose (REST_POSE in runtimes/typescript/src/feed.ts,
+# LipsyncTimeline.rest in the Swift runtime); tests/test_runtime_rest_pose.py
+# keeps the three in step.
 _REST_POSE = (_SILENCE_REST_OPENNESS, _NEUTRAL, _NEUTRAL)
 # Below this much movement the mouth is already at rest; no keyframe needed.
 _REST_EPSILON = 0.02
@@ -129,7 +129,7 @@ _NASAL_F2_MAX_BANDWIDTH_HZ = 300.0
 # rule, so "never" would cut false nasal closures on nasal-free speech from
 # 28 % to 9 % of voiced hops), the other's has none and loses its hums
 # without this rule. Keep "always" until a cue that separates murmurs from
-# close vowels exists (plans/deep-review-2026-09-results.md).
+# close vowels exists.
 _NASAL_MISSING_F2_DAMPED = "always"
 _NASAL_DARK_RATIO = 0.9
 _NASAL_SPURIOUS_F2_HZ = 1200.0

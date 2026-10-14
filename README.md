@@ -10,7 +10,7 @@ Goals:
 - **Provider-agnostic** — works with any `TTSService`; analysis runs on the PCM
   stream itself, with no reliance on provider word/phoneme timestamps, viseme
   events, or other side-channel metadata.
-- **No fork** — built on released `pipecat-ai` (~1.10.0) using only stock
+- **No fork** — built on released `pipecat-ai` (~1.12.0) using only stock
   extension points (frame processors, RTVI `server-message`); nothing in the
   framework is subclassed or patched.
 - **Playout-accurate** — batches are scheduled on the pipeline clock just
@@ -21,7 +21,25 @@ Implementation: `LipsyncProcessor` sits between the TTS service and the output
 transport, running a formant-based analyzer over the audio and emitting
 keyframe batches. `LipsyncMessageRelay`, placed after `transport.output()`,
 delivers each batch to clients as a standard RTVI `server-message` with
-`data.type: "bot-tts-lipsync"`.
+`data.type: "bot-tts-lipsync"`. In a bot (`server/bot.py` is the full example):
+
+```python
+from lipsync import LipsyncMessageRelay, LipsyncProcessor
+
+pipeline = Pipeline(
+    [
+        transport.input(),
+        stt,
+        user_aggregator,
+        llm,
+        tts,
+        LipsyncProcessor(),  # text_events=True: also use the TTS text (experimental)
+        transport.output(),
+        LipsyncMessageRelay(),
+        assistant_aggregator,
+    ]
+)
+```
 
 The analyzer is numpy-only DSP at 16 kHz on a 20 ms hop: order-16 LPC
 formants (F1 → openness, F2 → width/rounding) with adaptive per-voice
@@ -33,14 +51,15 @@ hop (about 1 % of one core per bot).
 
 ## Layout
 
-| Path                 | Purpose                                                                                                                                                                            |
-| -------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `server/lipsync/`    | The lipsync package: types, vendored DSP (LPC/Levinson, formants, pitch, P² quantiles), formant analyzer, `LipsyncProcessor`, app-local frames, RTVI server-message relay |
-| `server/bot.py`      | Official `pipecat init quickstart` starter bot with the lipsync processor + relay wired in                                                                                         |
-| `server/tests/`      | Unit tests (DSP, analyzer, processor, relay, end-to-end through a headless output transport)                                                                                       |
-| `server/benchmarks/` | Accuracy harness (Praat reference + designed corpus, seven Cartesia voices and a Deepgram voice, committed baselines) and the recorder behind the client's Eval tab           |
-| `client/`            | Vite + React web client: a Live tab (SmallWebRTC to the bot, animated mouth with timing/event inspectors) and an Eval tab that replays recorded clips                              |
-| `plans/`             | Plan of record ([plans/README.md](plans/README.md)): status, findings, what is and is not planned; the specification, tuning/review notes and experiment scripts behind them        |
+| Path                   | Purpose                                                                                                                                                                            |
+| ---------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `server/lipsync/`      | The lipsync package: types, vendored DSP (LPC/Levinson, formants, pitch, P² quantiles), formant analyzer, `LipsyncProcessor`, app-local frames, RTVI server-message relay          |
+| `server/bot.py`        | Official `pipecat init quickstart` starter bot with the lipsync processor + relay wired in                                                                                         |
+| `server/tests/`        | Unit tests (DSP, analyzer, processor, relay, end-to-end through a headless output transport)                                                                                       |
+| `server/benchmarks/`   | Accuracy harness (Praat reference + designed corpus, seven Cartesia voices and a Deepgram voice, committed baselines) and the recorder behind the client's Eval tab                 |
+| `client/`              | Vite + React example client on `runtimes/typescript`: a Live tab (SmallWebRTC to the bot, animated mouth with timing/event inspectors) and an Eval tab that replays recorded clips |
+| `runtimes/typescript/` | TypeScript runtime for web clients: the wire-format parser, `LipsyncFeed` (anchors batches on the wall clock and interpolates the pose), `PipecatClient` callbacks                 |
+| `runtimes/swift/`      | Swift package for on-device lipsync: a port of the formant analyzer (resampler, DSP, analyzer) and a timeline that samples the pose on the audio player's clock                    |
 
 ## How delivery works
 
@@ -62,7 +81,7 @@ still remaining at that moment (`lead`); the stock `RTVIObserver` forwards it
 as a standard `server-message`. Clients subscribe with the SDK's
 `onServerMessage` callback, demux on `data.type === "bot-tts-lipsync"`, and
 anchor the utterance on `now + lead − ws`: exact but for network transit, with
-no assumed lead (see `client/src/lipsync/protocol.ts` and `feed.ts`). Closure
+no assumed lead (see `runtimes/typescript/src/protocol.ts` and `feed.ts`). Closure
 and silence events are confirmed after their window's batch has left and ride
 in the next one, keyed by offset, so an event may precede its batch's window.
 
@@ -90,7 +109,7 @@ error at utterance start went from +309 ms median (worst +631; it assumed a
 200 ms lead the first batch never had) to −3 ms, the settled anchor from
 −90 ms to −3 ms, the first batch now leaves as playout starts (was 0.1–0.4 s
 after), and the longest a batch left late is 21 ms (was 840 ms, waiting behind
-a word-timestamp frame). Details in [plans/README.md](plans/README.md).
+a word-timestamp frame).
 
 ## Setup
 
@@ -120,25 +139,25 @@ uv run python -m benchmarks.accuracy --provider deepgram --offline --compare   #
 ```
 
 Scores the analyzer against Praat reference tracks (L1 formant Hz with coverage, L2
-trajectory shape and timing lag) and corpus expectations (L3 events and duty-cycle guards)
-— see [plans/benchmark-harness-accuracy.md](plans/benchmark-harness-accuracy.md).
+trajectory shape and timing lag) and corpus expectations (L3 events and duty-cycle guards).
 Baselines are committed (`server/benchmarks/results/baseline.json`, composite 86.0 pooled over
 seven Cartesia voices, 80–94 per voice; `baseline-deepgram.json`, 91.9) so `--compare` reads +0.0 on a clean
 checkout once the fixtures exist; fixtures themselves are not committed. While tuning,
 `--set dsp.LPC_ORDER=14` overrides any `dsp`/`analyzer` constant for one run and `--tag`
-names the results file; `plans/experiments/ab_table.py` runs whole A/B ladders.
+names the results file.
 
-Text-informed work is isolated on `codex/text-informed-events`; `main` at `8ea78f0`
-is the original comparison point. Stage 1 now has an **opt-in** English pronunciation
-prior for closure/nasal decisions and timed mouth-shape hints. Default DSP behavior is
-unchanged. Enable it with `LipsyncParams(text_events_enabled=True)` or benchmark with
-`--text-events`; `--text-prior` remains observation-only. Copy the entire `lipsync/`
+Text-informed events (stage 1, merged 2026-09-19) are **opt-in**: an English pronunciation
+prior for closure/nasal decisions and timed mouth-shape hints, read from the TTS service's own
+sentence and word-timestamp frames. Default DSP behavior is unchanged (`8ea78f0` is the
+DSP-only comparison point). Enable it with `LipsyncProcessor(text_events=True)` or benchmark
+with `--text-events`; `--text-prior` remains observation-only. Copy the entire `lipsync/`
 directory, including its licensed, packed `data/` lexicon; no new runtime dependency.
 Results include full-precision output and PCM hashes. Use `--tag` and
 `--compare <results.json>` for paired runs, and `--fixtures <directory>` to retain a
-separate audio/text-timing corpus. The gains and regressions are reviewed in
-[stage-1 results](plans/text-informed-events-stage1-results.md). Commands and limitations are in
-[the text-informed plan](plans/text-informed-events.md#current-branch-checkpoint--inputs-and-comparison).
+separate audio/text-timing corpus. Stage 1's review found the gains uneven: on fresh
+Cartesia takes hum detection rose from 5/14 to 14/14 and false closures on held-out controls
+fell from 42 to 0, while one bilabial take regressed and openness/width correlation dipped
+slightly, so it stays opt-in.
 
 ## Eval tab
 
@@ -161,7 +180,7 @@ with its release and due times, word timings, and the TTS arrival timeline, whic
 to the newest recording so changes compare on identical audio. Files land in
 `client/public/eval/` (gitignored), served as-is by the Vite dev server.
 
-On the text-informed branch, `--text-events` enables the experimental event layer;
+`--text-events` enables the experimental event layer;
 `--text-prior` only observes the frames. Old recordings did not capture sentence anchors: `--assume-early-text` explicitly
 supplies one from each example's text for those takes and marks the assumption in the run.
 New recordings preserve the real anchor arrivals automatically, including late or absent text.
@@ -184,8 +203,9 @@ for any TTS provider (nothing but the PCM stream, on released pipecat). The
 formant analyzer is the design of record and is judged close enough. The next
 step in fidelity would be a trained model, or provider-specific tiers (viseme
 events, timestamp + grapheme-to-phoneme); both are deliberately not planned.
-[plans/README.md](plans/README.md) is the plan of record: the status of every
-design and tuning note, the 2026-09 findings, and what is open.
+The specification, tuning and review notes and experiment scripts lived in
+`plans/` until 2026-10-14 and remain in the git history
+(`git show 9c85db4:plans/README.md`).
 
 Open items, in order:
 

@@ -2,7 +2,7 @@
  * Wire format of the lipsync payload, delivered inside the standard RTVI
  * `server-message`.
  *
- * Mirrors `lipsync_message_data` in the bot's lipsync/rtvi.py: the payload arrives
+ * Mirrors `lipsync_message_data` in the server's lipsync/rtvi.py: the payload arrives
  * as the `data` object passed to `onServerMessage`, with
  * `type: "bot-tts-lipsync"` as the demux discriminator (other server
  * messages are ignored by `parseLipsyncData`). Keyframes and events are

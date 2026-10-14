@@ -4,14 +4,13 @@ import {
   PipecatClientProvider,
 } from "@pipecat-ai/client-react";
 import { SmallWebRTCTransport } from "@pipecat-ai/small-webrtc-transport";
+import { LipsyncFeed, lipsyncCallbacks } from "@pipecat-visemes/typescript";
 import { useState, type ComponentProps } from "react";
 
 import "./App.css";
 import { ConnectBar } from "./components/ConnectBar";
 import { EvalView } from "./components/EvalView";
 import { LiveView } from "./components/LiveView";
-import { LipsyncFeed } from "./lipsync/feed";
-import { parseLipsyncData } from "./lipsync/protocol";
 
 interface Session {
   client: PipecatClient;
@@ -24,18 +23,9 @@ function createSession(): Session {
     transport: new SmallWebRTCTransport(),
     enableMic: true,
     enableCam: false,
-    callbacks: {
-      // Lipsync batches arrive as standard RTVI server-messages;
-      // parseLipsyncData demuxes on data.type === "bot-tts-lipsync".
-      onServerMessage: (data: unknown) => {
-        const batch = parseLipsyncData(data);
-        if (batch) feed.ingest(batch);
-      },
-      // Fires at once on barge-in (the server drops the unplayed audio and
-      // the batches not yet sent) and as the last audio leaves at a natural
-      // turn end; the feed keeps a short grace window either way.
-      onBotStoppedSpeaking: () => feed.cut(),
-    },
+    // Lipsync batches arrive as RTVI server-messages; bot-stopped-speaking
+    // cuts the utterance at the playhead (barge-in or a natural turn end).
+    callbacks: lipsyncCallbacks(feed),
   });
   return { client, feed };
 }

@@ -42,8 +42,7 @@ from pipecat.transports.base_transport import BaseTransport, TransportParams
 from pipecat.transports.daily.transport import DailyParams
 from pipecat.workers.runner import WorkerRunner
 
-from lipsync.lipsync_processor import LipsyncProcessor
-from lipsync.rtvi import LipsyncMessageRelay
+from lipsync import LipsyncMessageRelay, LipsyncProcessor
 
 load_dotenv(override=True)
 
@@ -80,11 +79,13 @@ async def run_bot(transport: BaseTransport, runner_args: RunnerArguments) -> Non
         ),
     )
 
-    # Lipsync: analyzes TTS audio and emits playout-timed articulation
-    # keyframes; the relay (placed after transport.output(), where the clock
-    # queue releases them at pts) delivers each batch to clients as a stock
-    # RTVI server-message with data.type "bot-tts-lipsync".
-    lipsync = LipsyncProcessor()
+    # Lipsync: LipsyncProcessor analyzes the TTS audio and releases mouth
+    # keyframes just ahead of playout; LipsyncMessageRelay, after
+    # transport.output(), sends each batch to the client as an RTVI
+    # server-message (data.type "bot-tts-lipsync"). text_events=True also
+    # reads the TTS service's own text for closures and nasals (experimental,
+    # English; without usable text the output is the audio-only analysis).
+    lipsync = LipsyncProcessor(text_events=False)
     lipsync_relay = LipsyncMessageRelay()
 
     context = LLMContext()

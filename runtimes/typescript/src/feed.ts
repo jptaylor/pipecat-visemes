@@ -13,11 +13,15 @@ import type {
  */
 export const SCHEDULING_LEAD_SEC = 0.2;
 
-/** Mouth pose when no keyframes apply (mirrors the analyzer's silence rest). */
+/**
+ * Mouth pose when no keyframes apply: the analyzer's silence rest (`_REST_POSE` in
+ * server/lipsync/formant_lipsync_analyzer.py), which silence decays toward and every
+ * utterance's closing keyframe carries, so the mouth settles where the server put it.
+ */
 export const REST_POSE = {
   openness: 0.15,
   width: 0.35,
-  rounding: 0.1,
+  rounding: 0.35,
   energy: 0,
   pitch: 0,
   confidence: 0,

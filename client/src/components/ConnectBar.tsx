@@ -3,9 +3,8 @@ import {
   usePipecatClientMediaDevices,
   usePipecatClientTransportState,
 } from "@pipecat-ai/client-react";
+import type { LipsyncFeed } from "@pipecat-visemes/typescript";
 import { useState } from "react";
-
-import type { LipsyncFeed } from "../lipsync/feed";
 
 const OFFER_URL = "/api/offer"; // proxied to the Pipecat dev runner by Vite
 

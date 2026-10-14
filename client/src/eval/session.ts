@@ -1,4 +1,5 @@
-import type { LipsyncEvent } from "../lipsync/protocol";
+import type { LipsyncEvent } from "@pipecat-visemes/typescript";
+
 import {
   audioUrl,
   clipEvents,

@@ -1,7 +1,5 @@
+import type { LipsyncEventKind, LipsyncFeed } from "@pipecat-visemes/typescript";
 import { useEffect, useRef } from "react";
-
-import type { LipsyncFeed } from "../lipsync/feed";
-import type { LipsyncEventKind } from "../lipsync/protocol";
 
 const CX = 200;
 const CY = 130;

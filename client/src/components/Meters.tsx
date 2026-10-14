@@ -1,6 +1,5 @@
+import type { ArticulationSample, LipsyncFeed } from "@pipecat-visemes/typescript";
 import { useEffect, useRef } from "react";
-
-import type { ArticulationSample, LipsyncFeed } from "../lipsync/feed";
 
 const PARAMS = [
   { key: "openness", label: "Openness", color: "var(--openness)" },

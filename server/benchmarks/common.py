@@ -1,8 +1,7 @@
 """Shared harness plumbing: corpus, TTS fixture cache, analyzer ingest mirror.
 
 Used by the accuracy benchmark and the eval recorder (``benchmarks.record``).
-Lives in the test harness only — never upstream. See
-plans/benchmark-harness-accuracy.md.
+Lives in the test harness only — never upstream.
 """
 
 import ast

@@ -1,7 +1,6 @@
 # Accuracy benchmark corpus: sentences with known articulation expectations.
-# See plans/benchmark-harness-accuracy.md §5. Event expectations are loose
-# ranges by design: the energy-dip closure detector fires on all stops, and
-# TTS coarticulation merges some closures.
+# Event expectations are loose ranges by design: the energy-dip closure
+# detector fires on all stops, and TTS coarticulation merges some closures.
 
 voices:
   cartesia:

@@ -1,6 +1,6 @@
+import type { FeedStats, LipsyncFeed } from "@pipecat-visemes/typescript";
 import { useEffect, useState } from "react";
 
-import type { FeedStats, LipsyncFeed } from "../lipsync/feed";
 import { Stat } from "./Stat";
 
 /** Message/keyframe rates, scheduler health, and the A/V trim control. */

@@ -10,3 +10,6 @@ server/benchmarks/results/*
 !server/benchmarks/results/baseline*.json
 # Eval tab recordings (python -m benchmarks.record); regenerate or commit a set deliberately
 client/public/eval/
+# Swift package build output
+runtimes/swift/.build/
+runtimes/swift/.swiftpm/

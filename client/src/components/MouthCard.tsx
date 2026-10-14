@@ -1,6 +1,6 @@
+import type { LipsyncFeed } from "@pipecat-visemes/typescript";
 import { useState } from "react";
 
-import type { LipsyncFeed } from "../lipsync/feed";
 import { Mouth } from "./Mouth";
 import { WireframeMouth } from "./WireframeMouth";
 
