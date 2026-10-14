@@ -38,8 +38,9 @@ public final class LipsyncTimeline {
         }
     }
 
-    /// The analyzer's silence rest: lips nearly closed.
-    public static let rest = Pose(openness: 0.15, width: 0.35, rounding: 0.1)
+    /// The analyzer's silence rest (`_REST_POSE` in server/lipsync/formant_lipsync_analyzer.py),
+    /// which silence decays toward: lips nearly closed, width and rounding neutral.
+    public static let rest = Pose(openness: 0.15, width: 0.35, rounding: 0.35)
     /// The lips start to part this long before an utterance's first keyframe: early enough
     /// to read as anticipation, too short to show an open mouth in silence.
     private static let prerollSeconds = 0.1
