@@ -206,3 +206,22 @@ class TestTextAnalyzer(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(context.analysis.text_prior.playout_start_pts, 9_000_000_000)
         await processor._handle_interruption()
         self.assertEqual(processor._last_word_pts, 0)
+
+
+class TestTextEventsSwitch(unittest.TestCase):
+    def test_one_argument_opt_in(self):
+        import lipsync
+
+        self.assertIs(lipsync.LipsyncProcessor, LipsyncProcessor)
+        self.assertIsNone(LipsyncProcessor()._analyzer._text_events)
+        processor = lipsync.LipsyncProcessor(text_events=True)
+        self.assertTrue(processor._params.text_events_enabled)
+        self.assertIsNotNone(processor._analyzer._text_events)
+
+    def test_argument_overrides_params_without_mutating_them(self):
+        params = LipsyncParams(batch_window_ms=100, text_events_enabled=True)
+        processor = LipsyncProcessor(params=params, text_events=False)
+        self.assertFalse(processor._params.text_events_enabled)
+        self.assertIsNone(processor._analyzer._text_events)
+        self.assertEqual(processor._params.batch_window_ms, 100)
+        self.assertTrue(params.text_events_enabled)

@@ -129,7 +129,7 @@ _NASAL_F2_MAX_BANDWIDTH_HZ = 300.0
 # rule, so "never" would cut false nasal closures on nasal-free speech from
 # 28 % to 9 % of voiced hops), the other's has none and loses its hums
 # without this rule. Keep "always" until a cue that separates murmurs from
-# close vowels exists (plans/deep-review-2026-09-results.md).
+# close vowels exists.
 _NASAL_MISSING_F2_DAMPED = "always"
 _NASAL_DARK_RATIO = 0.9
 _NASAL_SPURIOUS_F2_HZ = 1200.0

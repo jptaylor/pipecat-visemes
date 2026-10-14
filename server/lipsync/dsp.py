@@ -49,8 +49,8 @@ PRE_EMPHASIS = 0.97
 
 # LPC model order at 16 kHz: two poles per kHz of bandwidth. Order 12 is
 # pole-starved on real speech (resonances above F3 take poles, F1/F2 merge
-# into broad roots and the slots empty out); see
-# plans/deep-review-2026-09-results.md for the 12/14/16/18 A/B.
+# into broad roots and the slots empty out). Order 16 is the minimax pick
+# of a 12/14/16/18 A/B across Praat ceilings and voices (2026-09).
 LPC_ORDER = 16
 
 # LPC roots count as formants within these frequency/bandwidth bounds.

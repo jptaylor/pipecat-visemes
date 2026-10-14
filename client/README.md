@@ -1,6 +1,7 @@
 # Viseme client
 
-Vite + React web client for the lipsync bot in `../server`. The **Live** tab
+Vite + React web client for the lipsync bot in `../server`, and the example for the
+web runtime in `../runtimes/typescript` (wire format, `LipsyncFeed`). The **Live** tab
 connects over SmallWebRTC with the stock `PipecatClient`, receives lipsync
 batches as RTVI `server-message`s (`data.type === "bot-tts-lipsync"`), and
 renders an animated mouth with timing and event inspectors and a word-synced
@@ -21,9 +22,7 @@ Start the bot first for the Live tab (`cd ../server && uv run bot.py`).
 
 | Path                                | Purpose                                                                                    |
 | ----------------------------------- | ------------------------------------------------------------------------------------------ |
-| `src/App.tsx`                       | Client setup (`onServerMessage` → `parseLipsyncData` → `LipsyncFeed`), Live/Eval tabs      |
-| `src/lipsync/protocol.ts`           | Wire format of the lipsync payload and its parser                                          |
-| `src/lipsync/feed.ts`               | Buffers batches, anchors them on the wall clock, interpolates the mouth pose               |
+| `src/App.tsx`                       | Client setup (`lipsyncCallbacks(feed)` from the runtime), Live/Eval tabs                   |
 | `src/eval/`                         | Eval recordings (format, loaders), `ReplayFeed` (a feed on the audio clock), `EvalSession` |
 | `src/components/`                   | Mouth, timeline, meters, event log, stats bar, transcript card; the Eval tab's views       |
 | `src/hooks/useKaraokeTranscript.ts` | Word-level spoken progress from the SDK's `bot-output` events                              |

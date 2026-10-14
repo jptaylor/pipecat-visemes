@@ -1,5 +1,10 @@
-import { LipsyncFeed, SCHEDULING_LEAD_SEC, type ArticulationSample } from "../lipsync/feed";
-import type { LipsyncEvent } from "../lipsync/protocol";
+import {
+  LipsyncFeed,
+  SCHEDULING_LEAD_SEC,
+  type ArticulationSample,
+  type LipsyncEvent,
+} from "@pipecat-visemes/typescript";
+
 import type { TimedBatch } from "./recording";
 
 /**

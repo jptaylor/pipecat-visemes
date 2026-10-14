@@ -1,6 +1,5 @@
+import type { LipsyncFeed, LoggedEvent } from "@pipecat-visemes/typescript";
 import { useSyncExternalStore } from "react";
-
-import type { LipsyncFeed, LoggedEvent } from "../lipsync/feed";
 
 const MAX_ROWS = 30;
 

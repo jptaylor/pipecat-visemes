@@ -11,13 +11,13 @@
  * first played sample.
  */
 
-import { SCHEDULING_LEAD_SEC } from "../lipsync/feed";
 import {
   parseLipsyncData,
+  SCHEDULING_LEAD_SEC,
   type LipsyncBatch,
   type LipsyncEvent,
   type LipsyncEventKind,
-} from "../lipsync/protocol";
+} from "@pipecat-visemes/typescript";
 
 const EVAL_BASE = `${import.meta.env.BASE_URL}eval`;
 

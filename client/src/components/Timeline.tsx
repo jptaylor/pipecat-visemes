@@ -1,6 +1,5 @@
+import type { LipsyncFeed } from "@pipecat-visemes/typescript";
 import { useEffect, useRef } from "react";
-
-import type { LipsyncFeed } from "../lipsync/feed";
 
 const WINDOW_SEC = 8;
 const TRACES = [

@@ -1,4 +1,5 @@
-import type { LipsyncFeed } from "../lipsync/feed";
+import type { LipsyncFeed } from "@pipecat-visemes/typescript";
+
 import { EventLog } from "./EventLog";
 import { Meters } from "./Meters";
 import { MouthCard } from "./MouthCard";

@@ -123,7 +123,8 @@ class LipsyncParams(BaseModel):
             Enabling takes effect on the next context; disabling drops priors.
         text_events_enabled: Opt in to experimental English text-informed
             events in the default analyzer. Implies text collection. Custom
-            analyzers own this setting, like dead_band. Off by default.
+            analyzers own this setting, like dead_band. Off by default;
+            ``LipsyncProcessor(text_events=True)`` is the shorthand.
     """
 
     batch_window_ms: int = 200
@@ -234,6 +235,7 @@ class LipsyncProcessor(FrameProcessor):
     def __init__(
         self,
         *,
+        text_events: bool | None = None,
         params: LipsyncParams | None = None,
         analyzer: BaseLipsyncAnalyzer | None = None,
         **kwargs,
@@ -241,15 +243,23 @@ class LipsyncProcessor(FrameProcessor):
         """Initialize the lipsync processor.
 
         Args:
+            text_events: Also read the TTS service's own text (its sentence
+                and word-timestamp frames) for closure and nasal events.
+                Experimental, English only; whenever text is missing, late or
+                unrecognized, the output is exactly the audio-only analysis.
+                Shorthand for ``LipsyncParams.text_events_enabled``, and
+                overrides it when given.
             params: Batching, conditioning and scheduling parameters.
             analyzer: Analyzer to use. Defaults to
                 :class:`~lipsync.formant_lipsync_analyzer.FormantLipsyncAnalyzer`,
                 the provider-universal formant analyzer, configured with this
-                processor's ``dead_band`` and ``heartbeat_ms``.
+                processor's ``dead_band``, ``heartbeat_ms`` and text events.
             **kwargs: Additional arguments passed to parent class.
         """
         super().__init__(**kwargs)
         self._params = params or LipsyncParams()
+        if text_events is not None:
+            self._params = self._params.model_copy(update={"text_events_enabled": text_events})
         self._owns_analyzer = analyzer is None
         self._analyzer = analyzer or FormantLipsyncAnalyzer(
             dead_band=self._params.dead_band,

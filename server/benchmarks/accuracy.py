@@ -1,6 +1,6 @@
 """Accuracy benchmark: score the lipsync analyzer against Praat + corpus expectations.
 
-Three diagnostic layers (plans/benchmark-harness-accuracy.md):
+Three diagnostic layers:
 
 - L1 (DSP): our raw per-hop F1/F2 in Hz vs Praat reference tracks.
 - L2 (trajectory): our normalized openness/width shape vs per-clip-normalized
